@@ -1,0 +1,53 @@
+# Binaries
+host/ebpf-agent/ebpf-agent
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# Log files
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes and data
+monitoring/Docker/compose/prometheus-data/
+monitoring/Docker/compose/grafana-data/
+**/data/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+.env
+.env.local
+
+# Build artifacts
+dist/
+build/
+
+# Coverage reports
+coverage.txt
+coverage.html

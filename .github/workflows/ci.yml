@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-agent:
+    name: Build eBPF Agent
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24'
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang llvm linux-headers-$(uname -r)
+    
+    - name: Build eBPF program
+      working-directory: host/ebpf-agent
+      run: |
+        cd bpf
+        clang -O2 -g -target bpf -c exec.bpf.c -o exec.bpf.o
+        cp exec.bpf.o ../cmd/agent/bpf/
+    
+    - name: Build Go binary
+      working-directory: host/ebpf-agent
+      run: |
+        go mod download
+        go build -v -o ebpf-agent ./cmd/agent
+    
+    - name: Run Go tests
+      working-directory: host/ebpf-agent
+      run: go test -v ./...
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ebpf-agent
+        path: host/ebpf-agent/ebpf-agent
+
+  validate-configs:
+    name: Validate Configurations
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Validate YAML files
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y yamllint
+        yamllint -d relaxed monitoring/Docker/compose/
+    
+    - name: Validate Prometheus config
+      run: |
+        docker run --rm -v $(pwd)/monitoring/Docker/compose/prometheus:/prometheus \
+          prom/prometheus:latest \
+          promtool check config /prometheus/prometheus.yml
+    
+    - name: Validate alert rules
+      run: |
+        docker run --rm -v $(pwd)/monitoring/Docker/compose/prometheus:/prometheus \
+          prom/prometheus:latest \
+          promtool check rules /prometheus/rules/alerts.yml
+
+  docker-compose-test:
+    name: Test Docker Compose
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Test docker-compose
+      working-directory: monitoring/Docker/compose
+      run: |
+        docker-compose config
+        docker-compose up -d
+        sleep 30
+        docker-compose ps
+        curl -f http://localhost:9090/-/healthy || exit 1
+        curl -f http://localhost:3000/api/health || exit 1
+        docker-compose down

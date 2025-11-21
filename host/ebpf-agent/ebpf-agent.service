@@ -1,0 +1,20 @@
+[Unit]
+Description=eBPF Security Monitoring Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ebpf-agent
+Restart=always
+RestartSec=10
+User=root
+
+# Security hardening
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log
+
+[Install]
+WantedBy=multi-user.target

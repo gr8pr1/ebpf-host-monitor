@@ -1,0 +1,66 @@
+groups:
+- name: ebpf-alerts
+  rules:
+
+  # eBPF Agent Availability
+  - alert: EBPFExporterDown
+    expr: up{job="ebpf_agent"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "eBPF exporter down"
+      description: "The eBPF agent exporter is unreachable on {{ $labels.instance }}. Security monitoring may be incomplete."
+
+  # High Execution Activity (Potential Attack or Unusual Activity)
+  - alert: HighExecutionRate
+    expr: rate(ebpf_exec_events_total[5m]) > 10
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High command execution rate detected"
+      description: "Execution rate of {{ $value | humanize }} exec/sec on {{ $labels.instance }} exceeds normal threshold. Possible automated activity or attack."
+
+  # Critical Execution Spike (Immediate Attention Required)
+  - alert: CriticalExecutionSpike
+    expr: rate(ebpf_exec_events_total[2m]) > 50
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Critical execution spike detected"
+      description: "Extremely high execution rate of {{ $value | humanize }} exec/sec on {{ $labels.instance }}. Possible automated attack or malicious script execution."
+
+  # Sudo Usage Detected (Privilege Escalation)
+  - alert: SudoUsageDetected
+    expr: increase(ebpf_sudo_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: info
+    annotations:
+      summary: "Sudo command executed"
+      description: "Sudo command detected on {{ $labels.instance }}. Total sudo events: {{ $value }} in the last 5 minutes."
+
+  # Rapid Sudo Usage (Potential Privilege Escalation Attack)
+  - alert: RapidSudoUsage
+    expr: rate(ebpf_sudo_events_total[5m]) > 0.1
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Rapid sudo usage detected"
+      description: "High sudo usage rate of {{ $value | humanize }} sudo/sec on {{ $labels.instance }}. Possible privilege escalation attempt or automated sudo usage."
+
+- name: infrastructure-alerts
+  rules:
+
+  # Node Exporter Availability
+  - alert: NodeExporterDown
+    expr: up{job="node_exporter"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Node Exporter down"
+      description: "Node exporter is not reachable on {{ $labels.instance }}. System metrics collection is unavailable."

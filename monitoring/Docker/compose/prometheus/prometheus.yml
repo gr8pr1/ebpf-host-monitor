@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "rules/*.yml"
+
+scrape_configs:
+
+  - job_name: 'node_exporter'
+    static_configs:
+      - targets: ['YOUR_HOST_IP:9100']  # Replace with your host IP
+
+  - job_name: 'ebpf_agent'
+    static_configs:
+      - targets: ['YOUR_HOST_IP:9110']  # Replace with your host IP
+
