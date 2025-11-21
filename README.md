@@ -1,6 +1,6 @@
 # eBPF Security Monitoring System
 
-[![CI](https://github.com/YOUR_USERNAME/ebpf-host-monitor/workflows/CI/badge.svg)](https://github.com/YOUR_USERNAME/ebpf-host-monitor/actions)
+[![CI](https://github.com/gr8pr1/ebpf-host-monitor/workflows/CI/badge.svg)](https://github.com/gr8pr1/ebpf-host-monitor/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://golang.org/)
 [![Kernel](https://img.shields.io/badge/Kernel-5.8+-orange)](https://www.kernel.org/)
@@ -109,7 +109,7 @@ On the host you want to monitor:
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/ebpf-host-monitor.git
+git clone https://github.com/gr8pr1/ebpf-host-monitor.git
 cd ebpf-host-monitor
 
 # Run the quick-start script
