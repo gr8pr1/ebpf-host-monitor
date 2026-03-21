@@ -4,14 +4,32 @@ This guide walks you through deploying the eBPF Security Monitoring System in a 
 
 ## Architecture Overview
 
-```
-┌─────────────────┐         ┌─────────────────┐
-│   Host Server   │         │ Monitoring      │
-│  (YOUR_HOST_IP) │────────▶│   Server        │
-│                 │         │                 │
-│  eBPF Agent     │  :9110  │  Prometheus     │
-│  (Port 9110)    │         │  Grafana        │
-└─────────────────┘         └─────────────────┘
+```mermaid
+graph TB
+    subgraph HOSTS["Monitored Hosts"]
+        subgraph H1["Host 1"]
+            A1["eBPF Agent\n:9110"]
+            K1["Kernel Tracepoints\nexecve, connect, ptrace\nopenat, setuid/setgid"]
+            K1 --> A1
+        end
+        subgraph H2["Host 2"]
+            A2["eBPF Agent\n:9110"]
+            K2["Kernel Tracepoints"]
+            K2 --> A2
+        end
+    end
+
+    subgraph MON["Monitoring Server"]
+        PROM["Prometheus\n:9090"]
+        GRAF["Grafana\n:3000"]
+        ALERTS["Alert Rules"]
+
+        PROM --> GRAF
+        PROM --> ALERTS
+    end
+
+    A1 -->|"scrape"| PROM
+    A2 -->|"scrape"| PROM
 ```
 
 ## Prerequisites
@@ -29,6 +47,16 @@ This guide walks you through deploying the eBPF Security Monitoring System in a 
 - Network access to all monitored hosts
 
 ## Step 1: Deploy the Monitoring Stack
+
+```mermaid
+flowchart TD
+    A["Clone repo on monitoring server"] --> B["Edit prometheus.yml\n(set target host IPs)"]
+    B --> C["docker-compose up -d"]
+    C --> D{"docker-compose ps\nall services Up?"}
+    D -->|Yes| E["Access Prometheus :9090\nAccess Grafana :3000"]
+    D -->|No| F["Check docker-compose logs"]
+    F --> C
+```
 
 On your monitoring server:
 

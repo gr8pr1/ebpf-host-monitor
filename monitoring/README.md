@@ -2,6 +2,42 @@
 
 This directory contains the complete monitoring infrastructure for the eBPF Security Monitoring System.
 
+## Architecture
+
+```mermaid
+graph LR
+    subgraph Hosts["Monitored Hosts"]
+        H1["Host 1\nebpf-agent :9110"]
+        H2["Host 2\nebpf-agent :9110"]
+        H3["Host N\nebpf-agent :9110"]
+    end
+
+    subgraph Docker["Docker Compose Stack"]
+        PROM["Prometheus\n:9090"]
+        GRAF["Grafana\n:3000"]
+        RULES["Alert Rules\n(dynamic baselines)"]
+        DS["Datasource\n(auto-provisioned)"]
+
+        PROM --> RULES
+        DS --> GRAF
+        PROM --> DS
+    end
+
+    H1 & H2 & H3 -->|"scrape /metrics"| PROM
+```
+
+## Alert Flow
+
+```mermaid
+flowchart TD
+    PROM["Prometheus scrapes agents"] --> EVAL["Evaluate alert rules\n(rate, avg_over_time, predict_linear)"]
+    EVAL -->|"threshold breached"| FIRE["Alert fires"]
+    FIRE --> AM["Alertmanager\n(if configured)"]
+    FIRE --> UI["Prometheus Alerts UI\n:9090/alerts"]
+    AM --> NOTIFY["Email / Slack / PagerDuty"]
+    PROM --> GRAF["Grafana Dashboards\n:3000"]
+```
+
 ## Components
 
 - **Prometheus**: Time-series database and alerting engine

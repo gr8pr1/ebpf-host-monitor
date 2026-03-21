@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ebpf-agent
+ExecStart=/usr/local/bin/ebpf-agent -config /etc/ebpf-agent/config.yaml
 Restart=always
 RestartSec=10
 User=root

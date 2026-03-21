@@ -1,8 +1,9 @@
 groups:
-- name: ebpf-alerts
+- name: ebpf-security-alerts
   rules:
 
-  # eBPF Agent Availability
+  # ---- Agent Availability ----
+
   - alert: EBPFExporterDown
     expr: up{job="ebpf_agent"} == 0
     for: 1m
@@ -10,29 +11,30 @@ groups:
       severity: critical
     annotations:
       summary: "eBPF exporter down"
-      description: "The eBPF agent exporter is unreachable on {{ $labels.instance }}. Security monitoring may be incomplete."
+      description: "The eBPF agent is unreachable on {{ $labels.instance }}. Security monitoring is offline."
 
-  # High Execution Activity (Potential Attack or Unusual Activity)
+  # ---- Execution Monitoring ----
+
   - alert: HighExecutionRate
-    expr: rate(ebpf_exec_events_total[5m]) > 10
+    expr: rate(ebpf_exec_events_total[5m]) > 1.5 * avg_over_time(rate(ebpf_exec_events_total[5m])[1h:5m])
     for: 2m
     labels:
       severity: warning
     annotations:
-      summary: "High command execution rate detected"
-      description: "Execution rate of {{ $value | humanize }} exec/sec on {{ $labels.instance }} exceeds normal threshold. Possible automated activity or attack."
+      summary: "Execution rate anomaly detected"
+      description: "Execution rate on {{ $labels.instance }} is 1.5x above the rolling 1h baseline. Current: {{ $value | humanize }} exec/sec."
 
-  # Critical Execution Spike (Immediate Attention Required)
   - alert: CriticalExecutionSpike
-    expr: rate(ebpf_exec_events_total[2m]) > 50
+    expr: rate(ebpf_exec_events_total[2m]) > 3 * avg_over_time(rate(ebpf_exec_events_total[5m])[1h:5m])
     for: 1m
     labels:
       severity: critical
     annotations:
-      summary: "Critical execution spike detected"
-      description: "Extremely high execution rate of {{ $value | humanize }} exec/sec on {{ $labels.instance }}. Possible automated attack or malicious script execution."
+      summary: "Critical execution spike"
+      description: "Execution rate on {{ $labels.instance }} is 3x above baseline. Possible automated attack. Current: {{ $value | humanize }} exec/sec."
 
-  # Sudo Usage Detected (Privilege Escalation)
+  # ---- Privilege Escalation ----
+
   - alert: SudoUsageDetected
     expr: increase(ebpf_sudo_events_total[5m]) > 0
     for: 0m
@@ -40,22 +42,107 @@ groups:
       severity: info
     annotations:
       summary: "Sudo command executed"
-      description: "Sudo command detected on {{ $labels.instance }}. Total sudo events: {{ $value }} in the last 5 minutes."
+      description: "Sudo detected on {{ $labels.instance }}. Events in last 5m: {{ $value }}."
 
-  # Rapid Sudo Usage (Potential Privilege Escalation Attack)
   - alert: RapidSudoUsage
     expr: rate(ebpf_sudo_events_total[5m]) > 0.1
     for: 2m
     labels:
       severity: warning
     annotations:
-      summary: "Rapid sudo usage detected"
-      description: "High sudo usage rate of {{ $value | humanize }} sudo/sec on {{ $labels.instance }}. Possible privilege escalation attempt or automated sudo usage."
+      summary: "Rapid sudo usage"
+      description: "High sudo rate of {{ $value | humanize }}/sec on {{ $labels.instance }}. Possible privilege escalation attack."
+
+  - alert: SetuidDetected
+    expr: increase(ebpf_setuid_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "setuid() syscall detected"
+      description: "A setuid() call was made on {{ $labels.instance }}. Possible privilege escalation bypassing sudo."
+
+  - alert: SetgidDetected
+    expr: increase(ebpf_setgid_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "setgid() syscall detected"
+      description: "A setgid() call was made on {{ $labels.instance }}. Possible privilege escalation."
+
+  # ---- Sensitive File Access ----
+
+  - alert: PasswdReadDetected
+    expr: increase(ebpf_passwd_read_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "/etc/passwd read detected"
+      description: "Someone read /etc/passwd on {{ $labels.instance }}. Events in last 5m: {{ $value }}."
+
+  - alert: SensitiveFileAccess
+    expr: increase(ebpf_sensitive_file_access_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Sensitive file accessed"
+      description: "Access to /etc/shadow, /etc/sudoers, or authorized_keys detected on {{ $labels.instance }}. Events: {{ $value }}."
+
+  - alert: RapidSensitiveFileAccess
+    expr: rate(ebpf_sensitive_file_access_total[5m]) > 0.05
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Rapid sensitive file access"
+      description: "Repeated access to sensitive files on {{ $labels.instance }} at {{ $value | humanize }}/sec. Possible credential harvesting."
+
+  # ---- Network / C2 Detection ----
+
+  - alert: SuspiciousOutboundConnection
+    expr: increase(ebpf_suspicious_connect_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Connection to suspicious port detected"
+      description: "Outbound connection to a known C2 port (4444, 1337, etc.) on {{ $labels.instance }}. Possible reverse shell or C2 beacon."
+
+  - alert: HighOutboundConnectRate
+    expr: rate(ebpf_connect_events_total[5m]) > 1.5 * avg_over_time(rate(ebpf_connect_events_total[5m])[1h:5m])
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Outbound connection rate anomaly"
+      description: "Connect rate on {{ $labels.instance }} is 1.5x above rolling baseline. Current: {{ $value | humanize }}/sec."
+
+  # ---- Process Injection ----
+
+  - alert: PtraceDetected
+    expr: increase(ebpf_ptrace_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "ptrace() syscall detected"
+      description: "A ptrace() call was made on {{ $labels.instance }}. Possible process injection or debugger attachment (MITRE T1055)."
+
+  - alert: RapidPtraceUsage
+    expr: rate(ebpf_ptrace_events_total[5m]) > 0.02
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Rapid ptrace usage"
+      description: "Multiple ptrace() calls on {{ $labels.instance }} at {{ $value | humanize }}/sec. Active process injection attack likely."
 
 - name: infrastructure-alerts
   rules:
 
-  # Node Exporter Availability
   - alert: NodeExporterDown
     expr: up{job="node_exporter"} == 0
     for: 1m
@@ -63,4 +150,4 @@ groups:
       severity: critical
     annotations:
       summary: "Node Exporter down"
-      description: "Node exporter is not reachable on {{ $labels.instance }}. System metrics collection is unavailable."
+      description: "Node exporter is not reachable on {{ $labels.instance }}."

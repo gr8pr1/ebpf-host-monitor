@@ -5,8 +5,10 @@ A lightweight eBPF-based security monitoring agent that tracks system events in 
 ## What It Monitors
 
 1. **Command Executions**: All `execve` syscalls
-2. **Privilege Escalation**: Sudo command usage
-3. **Sensitive File Access**: Attempts to read `/etc/passwd`
+2. **Privilege Escalation**: Sudo usage, `setuid()`, `setgid()`
+3. **Sensitive File Access**: `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `~/.ssh/authorized_keys`
+4. **Network Connections**: All `connect()` calls, with C2 port flagging (4444, 1337, etc.)
+5. **Process Injection**: `ptrace()` calls (debugger attach, injection attempts)
 
 ## Building
 
@@ -45,9 +47,9 @@ sudo ./ebpf-agent
 ```
 
 The agent will:
-1. Load the eBPF program into the kernel
-2. Attach to the `sys_enter_execve` tracepoint
-3. Start the Prometheus metrics server on port 9110
+1. Load the eBPF programs into the kernel
+2. Attach to tracepoints defined in `config.yaml`
+3. Start the Prometheus metrics server on the configured port
 4. Begin monitoring and logging events
 
 ## Installation as a Service
@@ -98,6 +100,33 @@ ebpf_passwd_read_events_total 2
 
 ## How It Works
 
+```mermaid
+graph TB
+    subgraph KS["Kernel Space"]
+        SYSCALL["Process calls execve / connect / ptrace / openat / setuid"]
+        TP["Tracepoint fires"]
+        BPF["eBPF program runs"]
+        MAPS["Per-CPU Array Maps\n(lock-free counters)"]
+
+        SYSCALL --> TP --> BPF --> MAPS
+    end
+
+    subgraph US["User Space"]
+        AGENT["Go Agent"]
+        POLL["Poll maps every 1s\nsum per-CPU values\ncalculate delta"]
+        PROM["Prometheus Counter"]
+        HTTP["/metrics endpoint"]
+
+        MAPS -.->|"bpf_map_lookup_elem"| POLL
+        AGENT --> POLL --> PROM --> HTTP
+    end
+
+    subgraph CONFIG["Configuration"]
+        YAML["config.yaml"]
+        YAML -->|"tracepoints + metrics"| AGENT
+    end
+```
+
 ### eBPF Program (`bpf/exec.bpf.c`)
 
 The eBPF program runs in kernel space and:
@@ -122,20 +151,27 @@ The Go agent:
 
 ### Data Flow
 
-```
-Kernel Space                    User Space                  Monitoring
-┌──────────────┐               ┌──────────────┐            ┌──────────┐
-│   execve()   │──tracepoint──▶│ eBPF Program │            │          │
-│   syscall    │               │              │            │          │
-└──────────────┘               │ ┌──────────┐ │            │          │
-                               │ │ Per-CPU  │ │◀──poll─────│ Go Agent │
-                               │ │   Maps   │ │            │          │
-                               │ └──────────┘ │            │          │
-                               └──────────────┘            └────┬─────┘
-                                                                │
-                                                                │ HTTP
-                                                                ▼
-                                                           Prometheus
+```mermaid
+flowchart LR
+    subgraph Kernel
+        E["execve()"] --> T1["tracepoint"]
+        C["connect()"] --> T2["tracepoint"]
+        P["ptrace()"] --> T3["tracepoint"]
+        O["openat()"] --> T4["tracepoint"]
+        S["setuid()"] --> T5["tracepoint"]
+
+        T1 & T2 & T3 & T4 & T5 --> BPF["eBPF Programs"]
+        BPF --> M["Per-CPU Maps"]
+    end
+
+    subgraph UserSpace["User Space"]
+        M -.->|"poll 1s"| GA["Go Agent"]
+        GA -->|"delta"| PC["Prometheus Counters"]
+        PC --> HTTP[":9110/metrics"]
+    end
+
+    HTTP -->|"scrape"| PROM["Prometheus"]
+    PROM --> GRAF["Grafana"]
 ```
 
 ## Performance
@@ -177,11 +213,11 @@ Run with sudo: `sudo ./ebpf-agent`
 
 ### Adding New Metrics
 
-1. Add a new map in `bpf/exec.bpf.c`
-2. Update the eBPF program logic
-3. Add a Prometheus counter in `exporter/metrics.go`
-4. Update `cmd/agent/main.go` to read the new map
-5. Register the new metric with Prometheus
+1. Add a new per-CPU map in `bpf/exec.bpf.c` (inside an `#ifdef` guard)
+2. Add the detection logic in the appropriate tracepoint handler
+3. Add a `MONITOR_*` flag in the `Makefile`
+4. Add the metric entry in `config.yaml`
+5. Rebuild: `make all`
 
 ## Security Notes
 
