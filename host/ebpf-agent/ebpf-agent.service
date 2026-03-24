@@ -1,5 +1,5 @@
 [Unit]
-Description=eBPF Security Monitoring Agent
+Description=eBPF Adaptive Security Monitoring Agent
 After=network.target
 
 [Service]
@@ -9,12 +9,11 @@ Restart=always
 RestartSec=10
 User=root
 
-# Security hardening
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log
+ReadWritePaths=/var/log /var/lib/ebpf-agent
 
 [Install]
 WantedBy=multi-user.target

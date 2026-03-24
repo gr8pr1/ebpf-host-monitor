@@ -1,0 +1,85 @@
+groups:
+- name: ebpf-baseline-alerts
+  rules:
+
+  # ---- Agent Availability ----
+
+  - alert: EBPFAgentDown
+    expr: up{job="ebpf_agent"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "eBPF agent down on {{ $labels.instance }}"
+      description: "The eBPF agent is unreachable. Security monitoring is offline."
+
+  # ---- Adaptive Baseline Alerts ----
+
+  - alert: BaselineAnomaly
+    expr: ebpf_anomaly_score > 3.0
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "{{ $labels.metric }} anomaly on {{ $labels.host }}"
+      description: >
+        {{ $labels.metric }} ({{ $labels.dimension }}) on {{ $labels.host }}
+        has z-score {{ $value | printf "%.1f" }}.
+
+  - alert: CriticalAnomaly
+    expr: ebpf_anomaly_score > 5.0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Critical anomaly: {{ $labels.metric }} on {{ $labels.host }}"
+      description: >
+        {{ $labels.metric }} ({{ $labels.dimension }}) on {{ $labels.host }}
+        has z-score {{ $value | printf "%.1f" }}. Immediate investigation required.
+
+  - alert: BaselineLearningStalled
+    expr: ebpf_baseline_phase == 1 and ebpf_baseline_progress < 0.1
+    for: 24h
+    labels:
+      severity: warning
+    annotations:
+      summary: "Baseline learning stalled on {{ $labels.host }}"
+      description: "Agent has been in learning phase with under 10% progress for over 24h."
+
+  # ---- Static Fallback Alerts (active during learning phase) ----
+
+  - alert: SuspiciousOutboundConnection
+    expr: increase(ebpf_suspicious_connect_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Connection to suspicious port on {{ $labels.host }}"
+      description: "Outbound connection to a known C2 port detected."
+
+  - alert: PtraceDetected
+    expr: increase(ebpf_ptrace_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "ptrace() detected on {{ $labels.host }}"
+      description: "A ptrace() call was made. Possible process injection."
+
+  - alert: SensitiveFileAccess
+    expr: increase(ebpf_sensitive_file_access_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Sensitive file accessed on {{ $labels.host }}"
+      description: "Access to /etc/shadow, /etc/sudoers, or authorized_keys detected."
+
+  - alert: CapsetDetected
+    expr: increase(ebpf_capset_events_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Capability change on {{ $labels.host }}"
+      description: "A capset() call was made. Possible privilege escalation."

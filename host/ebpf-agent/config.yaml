@@ -1,82 +1,153 @@
 server:
   port: 9110
   metrics_path: /metrics
-  # TLS configuration (optional)
   tls:
     enabled: false
     cert_file: ""
     key_file: ""
-  # Basic auth (optional)
   basic_auth:
     enabled: false
     username: ""
     password: ""
 
 poll_interval: 1s
-
-# BPF object file path (relative to binary or absolute)
 bpf_object: bpf/exec.bpf.o
+
+# Host identification (auto-detected from /etc/machine-id if empty)
+host:
+  id: ""
+  labels:
+    environment: ""
+    role: ""
+
+# Adaptive baseline configuration
+baseline:
+  learning_duration: 168h
+  aggregation_window: 1m
+  recalibration_interval: 24h
+  ewma_alpha: 0.01
+  state_file: /var/lib/ebpf-agent/baseline.db
+
+# Anomaly scoring thresholds
+scoring:
+  zscore_threshold: 3.0
+  quantile_threshold: 0.99
+  minimum_samples: 60
+
+# Container monitoring (requires cgroup v2)
+container_monitoring:
+  enabled: false
+  cgroup_root: /sys/fs/cgroup
+
+# Baseline dimensions to track
+dimensions:
+  per_user: true
+  per_process: true
+  per_container: false
+  network: true
+  filesystem: true
+  scheduling: true
 
 # Tracepoints to attach eBPF programs to
 tracepoints:
+  # Execution monitoring
   - group: syscalls
     name: sys_enter_execve
     program: trace_exec
+  # Network monitoring
   - group: syscalls
     name: sys_enter_connect
     program: trace_connect
+  # Process injection
   - group: syscalls
     name: sys_enter_ptrace
     program: trace_ptrace
+  # Sensitive file access
   - group: syscalls
     name: sys_enter_openat
     program: trace_openat
+  # Privilege escalation
   - group: syscalls
     name: sys_enter_setuid
     program: trace_setuid
   - group: syscalls
     name: sys_enter_setgid
     program: trace_setgid
+  # Process lifecycle
+  - group: sched
+    name: sched_process_fork
+    program: trace_fork
+  - group: sched
+    name: sched_process_exit
+    program: trace_exit
+  # Network: new listening ports
+  - group: syscalls
+    name: sys_enter_bind
+    program: trace_bind
+  # DNS monitoring
+  - group: syscalls
+    name: sys_enter_sendto
+    program: trace_sendto
+  # Capability changes
+  - group: syscalls
+    name: sys_enter_capset
+    program: trace_capset
 
 # Metrics to expose — each maps a BPF per-CPU map to a Prometheus counter
 metrics:
   # Execution monitoring
   - name: ebpf_exec_events_total
-    help: "Total execve events recorded by eBPF"
+    help: "Total execve events"
     bpf_map: exec_counter
-
   - name: ebpf_sudo_events_total
-    help: "Total sudo privilege escalation events recorded by eBPF"
+    help: "Total sudo privilege escalation events"
     bpf_map: sudo_counter
-
   - name: ebpf_passwd_read_events_total
-    help: "Total /etc/passwd read attempts recorded by eBPF"
+    help: "Total /etc/passwd read attempts"
     bpf_map: passwd_read_counter
 
   # Network monitoring
   - name: ebpf_connect_events_total
-    help: "Total outbound connect() syscalls recorded by eBPF"
+    help: "Total outbound connect() syscalls"
     bpf_map: connect_counter
-
   - name: ebpf_suspicious_connect_events_total
-    help: "Total connections to suspicious ports (C2 ports) recorded by eBPF"
+    help: "Total connections to suspicious C2 ports"
     bpf_map: suspicious_connect_counter
 
   # Process injection
   - name: ebpf_ptrace_events_total
-    help: "Total ptrace() syscalls (process injection/debugger attach) recorded by eBPF"
+    help: "Total ptrace() syscalls"
     bpf_map: ptrace_counter
 
   # Sensitive file access
   - name: ebpf_sensitive_file_access_total
-    help: "Total openat() on sensitive files (/etc/shadow, /etc/sudoers, ~/.ssh/authorized_keys)"
+    help: "Total openat() on sensitive files"
     bpf_map: sensitive_file_counter
 
-  # Privilege escalation (non-sudo)
+  # Privilege escalation
   - name: ebpf_setuid_events_total
-    help: "Total setuid() syscalls recorded by eBPF"
+    help: "Total setuid() syscalls"
     bpf_map: setuid_counter
-
   - name: ebpf_setgid_events_total
-    help: "Total setgid() syscalls recorded by eBPF"
+    help: "Total setgid() syscalls"
     bpf_map: setgid_counter
+
+  # Process lifecycle
+  - name: ebpf_fork_events_total
+    help: "Total fork events"
+    bpf_map: fork_counter
+
+  # Network: bind
+  - name: ebpf_bind_events_total
+    help: "Total bind() syscalls"
+    bpf_map: bind_counter
+
+  # DNS
+  - name: ebpf_dns_events_total
+    help: "Total DNS queries (sendto port 53)"
+    bpf_map: dns_counter
+
+  # Capabilities
+  - name: ebpf_capset_events_total
+    help: "Total capset() syscalls"
+    bpf_map: capset_counter

@@ -1,6 +1,4 @@
-# Contributing to eBPF Security Monitoring System
-
-Thanks for your interest in contributing! This document provides guidelines for contributing to the project.
+# Contributing
 
 ## Getting Started
 
@@ -15,132 +13,69 @@ Thanks for your interest in contributing! This document provides guidelines for 
 
 ## Development Setup
 
-### Host Agent Development
-
 ```bash
 cd host/ebpf-agent
-
-# Install dependencies
 go mod download
-
-# Build
 make all
-
-# Test
 sudo ./ebpf-agent
-```
-
-### Monitoring Stack Development
-
-```bash
-cd monitoring/Docker/compose
-
-# Start services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
 ```
 
 ## Code Style
 
-### Go Code
+### Go
 - Follow standard Go conventions
 - Run `go fmt` before committing
-- Add comments for exported functions
 - Keep functions focused and small
 
-### eBPF Code
+### eBPF C
 - Follow Linux kernel coding style
-- Add comments explaining complex logic
-- Keep programs simple and verifiable
-- Test thoroughly (eBPF verifier is strict)
+- Keep programs simple and verifiable (eBPF verifier is strict)
+- Gate new features behind `#ifdef MONITOR_*` compile-time flags
 
-### YAML/Config Files
+### YAML
 - Use 2-space indentation
-- Add comments for non-obvious settings
 - Validate syntax before committing
+
+## Adding a New Monitor
+
+1. **BPF**: Add a new tracepoint program, per-CPU counter map, and ringbuf `emit_event()` call in `bpf/exec.bpf.c`. Gate it behind a `MONITOR_*` flag.
+2. **Makefile**: Add the new flag to the Makefile.
+3. **Config**: Add the tracepoint and metric entries in `config.yaml`.
+4. **Aggregator**: Add the event type mapping in `internal/aggregator/aggregator.go`.
+5. **Tests**: Update `internal/config/config_test.go`.
+6. **Docs**: Update `README.md` and `ADAPTIVE_BASELINE_ARCHITECTURE.md`.
 
 ## Testing
 
-### Testing the eBPF Agent
-
 ```bash
-# Start the agent
+# Run unit tests
+make test
+
+# Test the agent manually
 sudo ./ebpf-agent
 
-# In another terminal, trigger events
-ls
-sudo ls
-cat /etc/passwd
+# Generate events
+ls && sudo ls && cat /etc/passwd
 
 # Check metrics
-curl http://localhost:9110/metrics
+curl http://localhost:9110/metrics | grep ebpf_
 ```
-
-### Testing Alerts
-
-```bash
-# Generate high execution rate
-for i in {1..100}; do ls > /dev/null; done
-
-# Check Prometheus alerts
-# Visit http://localhost:9090/alerts
-```
-
-## Adding New Features
-
-### Adding a New eBPF Monitor
-
-1. Update `bpf/exec.bpf.c`:
-   - Add a new map
-   - Add detection logic
-   - Update the tracepoint handler
-
-2. Update `exporter/metrics.go`:
-   - Add a new Prometheus metric
-
-3. Update `cmd/agent/main.go`:
-   - Read the new map
-   - Update the metric
-
-4. Update documentation
-
-### Adding New Alerts
-
-1. Edit `monitoring/Docker/compose/prometheus/rules/alerts.yml`
-2. Add your alert rule
-3. Test with `promtool check rules alerts.yml`
-4. Restart Prometheus: `docker-compose restart prometheus`
 
 ## Pull Request Guidelines
 
-- **Title**: Clear and descriptive
-- **Description**: Explain what and why
-- **Testing**: Describe how you tested
-- **Documentation**: Update relevant docs
-- **Commits**: Keep them logical and atomic
+- Clear and descriptive title
+- Explain what and why
+- Describe how you tested
+- Update relevant docs
+- Keep commits logical and atomic
 
 ## Reporting Issues
 
-When reporting bugs, include:
-- OS and kernel version
-- Go version
+Include:
+- OS and kernel version (`uname -r`)
+- Go version (`go version`)
 - Steps to reproduce
-- Expected vs actual behavior
-- Relevant logs
-
-## Feature Requests
-
-For feature requests, describe:
-- The problem you're trying to solve
-- Your proposed solution
-- Any alternatives you've considered
-- How it benefits other users
-
-## Questions?
-
-Feel free to open an issue for questions or discussions.
+- Relevant logs (`sudo journalctl -u ebpf-agent`)
 
 ## License
 

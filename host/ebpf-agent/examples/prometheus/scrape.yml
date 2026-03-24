@@ -1,0 +1,12 @@
+# Example Prometheus scrape configuration for the eBPF agent.
+# Add this to your prometheus.yml scrape_configs section.
+#
+# Replace YOUR_HOST_IP with the actual host IP where the agent runs.
+
+scrape_configs:
+  - job_name: 'ebpf_agent'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['YOUR_HOST_IP:9110']
+        labels:
+          environment: 'production'
