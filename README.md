@@ -65,6 +65,7 @@ The agent maps kernel events to MITRE techniques using enrichment context, not j
 - Linux kernel 5.8+ with eBPF support
 - Go 1.24+
 - clang and llvm
+- libbpf development headers (`libbpf-dev` on Debian/Ubuntu, `libbpf-devel` on RHEL/Fedora, `libbpf` on Arch)
 - Kernel headers installed
 
 ## Quick Start

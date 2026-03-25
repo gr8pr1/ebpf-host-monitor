@@ -29,13 +29,13 @@ echo "Installing dependencies..."
 case $OS in
     ubuntu|debian)
         apt-get update
-        apt-get install -y linux-headers-$(uname -r) clang llvm golang-go curl
+        apt-get install -y linux-headers-$(uname -r) clang llvm libbpf-dev golang-go curl
         ;;
     centos|rhel|fedora)
-        yum install -y kernel-devel clang llvm golang curl
+        yum install -y kernel-devel clang llvm libbpf-devel golang curl
         ;;
     arch|manjaro|endeavouros)
-        pacman -Sy --needed --noconfirm linux-headers clang llvm go curl
+        pacman -Sy --needed --noconfirm linux-headers clang llvm libbpf go curl
         ;;
     *)
         echo "Warning: Unsupported OS. Please install dependencies manually:"
