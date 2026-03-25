@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,8 +24,8 @@ import (
 	"ebpf-agent/internal/baseline"
 	"ebpf-agent/internal/config"
 	"ebpf-agent/internal/enricher"
+	"ebpf-agent/internal/mitre"
 	"ebpf-agent/internal/phase"
-	"ebpf-agent/internal/poller"
 	"ebpf-agent/internal/ringbuf"
 	"ebpf-agent/internal/scorer"
 	"ebpf-agent/internal/store"
@@ -34,6 +35,9 @@ import _ "embed"
 
 //go:embed bpf/exec.bpf.o
 var bpfProgram []byte
+
+var eventsProcessed atomic.Int64
+var ringbufDrops atomic.Int64
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -45,7 +49,6 @@ func main() {
 	}
 
 	hostID := cfg.Host.ID
-	hostLabel := prometheus.Labels{"host": hostID}
 
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfProgram))
 	if err != nil {
@@ -58,7 +61,6 @@ func main() {
 	}
 	defer coll.Close()
 
-	// --- Attach tracepoints ---
 	var tracepoints []link.Link
 	for _, tp := range cfg.Tracepoints {
 		prog, ok := coll.Programs[tp.Program]
@@ -83,63 +85,45 @@ func main() {
 		log.Fatalf("no tracepoints attached, exiting")
 	}
 
-	// --- Counter pollers (backward-compat raw counters with host label) ---
-	var pollers []*poller.MetricPoller
-	for _, m := range cfg.Metrics {
-		bpfMap, ok := coll.Maps[m.BPFMap]
-		if !ok {
-			log.Printf("WARN: BPF map %q not found, skipping metric %s", m.BPFMap, m.Name)
-			continue
-		}
+	// --- Agent health metrics (Prometheus, health-only) ---
+	agentInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ebpf_agent_info",
+		Help: "Agent metadata",
+	}, []string{"host", "version"})
+	agentInfo.WithLabelValues(hostID, "3.0.0").Set(1)
 
-		cv := prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: m.Name,
-			Help: m.Help,
-		}, []string{"host"})
-		prometheus.MustRegister(cv)
-		counter := cv.With(hostLabel)
+	baselinePhaseGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "ebpf_baseline_phase",
+		Help:        "Current phase: 1=learning, 2=monitoring",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	})
+	baselineProgressGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "ebpf_baseline_progress",
+		Help:        "Learning phase progress 0.0 to 1.0",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	})
+	eventsProcessedCounter := prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name:        "ebpf_events_processed_total",
+		Help:        "Total events processed through the pipeline",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	}, func() float64 { return float64(eventsProcessed.Load()) })
 
-		pollers = append(pollers, poller.NewMetricPoller(m.Name, bpfMap, counter))
-		log.Printf("Registered metric %s -> map %s", m.Name, m.BPFMap)
-	}
-	if len(pollers) == 0 {
-		log.Fatalf("no metrics registered, exiting")
-	}
+	ringbufDropsCounter := prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name:        "ebpf_ringbuf_drops_total",
+		Help:        "Events dropped due to backpressure",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	}, func() float64 { return float64(ringbufDrops.Load()) })
 
-	// --- Baseline/anomaly Prometheus metrics ---
-	baselinePhaseGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ebpf_baseline_phase",
-		Help: "Current phase: 1=learning, 2=monitoring",
-	}, []string{"host"})
-	baselineProgressGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ebpf_baseline_progress",
-		Help: "Learning phase progress 0.0 to 1.0",
-	}, []string{"host"})
-	baselineMeanGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ebpf_baseline_mean",
-		Help: "Current baseline mean for a metric dimension",
-	}, []string{"host", "metric", "dimension"})
-	baselineStddevGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ebpf_baseline_stddev",
-		Help: "Current baseline standard deviation",
-	}, []string{"host", "metric", "dimension"})
-	baselineUpperGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ebpf_baseline_upper_bound",
-		Help: "Upper bound: mean + threshold * stddev",
-	}, []string{"host", "metric", "dimension"})
-	anomalyScoreGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ebpf_anomaly_score",
-		Help: "Latest z-score for a metric dimension",
-	}, []string{"host", "metric", "dimension"})
-	anomalyTotalCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "ebpf_anomaly_total",
-		Help: "Total anomalies detected",
-	}, []string{"host", "metric", "dimension", "severity"})
+	tracepointsAttached := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "ebpf_tracepoints_attached",
+		Help:        "Number of active tracepoint attachments",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	})
+	tracepointsAttached.Set(float64(len(tracepoints)))
 
 	prometheus.MustRegister(
-		baselinePhaseGauge, baselineProgressGauge,
-		baselineMeanGauge, baselineStddevGauge, baselineUpperGauge,
-		anomalyScoreGauge, anomalyTotalCounter,
+		agentInfo, baselinePhaseGauge, baselineProgressGauge,
+		eventsProcessedCounter, ringbufDropsCounter, tracepointsAttached,
 	)
 
 	// --- Baseline pipeline ---
@@ -155,28 +139,29 @@ func main() {
 		defer st.Close()
 	}
 
-	sc := scorer.New(blEngine, cfg.Scoring.ZScoreThreshold)
+	sc := scorer.New(blEngine, cfg.Scoring.ZScoreThreshold, cfg.Baseline.MinStdDev, cfg.Scoring.ColdStartSeverity)
 
 	var scoreMu sync.Mutex
 	onScore := func(results []scorer.Result) {
 		scoreMu.Lock()
 		defer scoreMu.Unlock()
 		for _, r := range results {
-			dim := dimensionLabel(r.Key)
-			anomalyScoreGauge.WithLabelValues(hostID, r.Key.MetricName, dim).Set(r.ZScore)
-			baselineMeanGauge.WithLabelValues(hostID, r.Key.MetricName, dim).Set(r.Mean)
-			baselineStddevGauge.WithLabelValues(hostID, r.Key.MetricName, dim).Set(r.StdDev)
-			upper := r.Mean + cfg.Scoring.ZScoreThreshold*r.StdDev
-			baselineUpperGauge.WithLabelValues(hostID, r.Key.MetricName, dim).Set(upper)
-
 			if r.Anomaly {
-				severity := "warning"
-				if math.Abs(r.ZScore) > 5.0 {
-					severity = "critical"
+				severity := r.Severity
+				if severity == "" {
+					severity = "warning"
+					if math.Abs(r.ZScore) > 5.0 {
+						severity = "critical"
+					}
 				}
-				anomalyTotalCounter.WithLabelValues(hostID, r.Key.MetricName, dim, severity).Inc()
-				log.Printf("ANOMALY [%s] %s/%s z=%.2f (mean=%.2f stddev=%.2f observed=%.0f)",
-					severity, r.Key.MetricName, dim, r.ZScore, r.Mean, r.StdDev, r.Observed)
+				dim := dimensionLabel(r.Key)
+				if r.ColdStart {
+					log.Printf("COLD-START [%s] %s/%s new dimension observed (count=%.0f)",
+						severity, r.Key.MetricName, dim, r.Observed)
+				} else {
+					log.Printf("ANOMALY [%s] %s/%s z=%.2f (mean=%.2f stddev=%.2f observed=%.0f)",
+						severity, r.Key.MetricName, dim, r.ZScore, r.Mean, r.StdDev, r.Observed)
+				}
 			}
 		}
 	}
@@ -213,13 +198,22 @@ func main() {
 
 		go func() {
 			for ev := range rbConsumer.Events() {
+				eventsProcessed.Add(1)
 				enriched := enrich.Enrich(ev)
+
+				mapping := mitre.Map(enriched)
+				if !enriched.Resolved {
+					log.Printf("ENRICH-FAIL pid=%d comm=%s (process exited before resolution)",
+						ev.PID, ev.CommString())
+				}
+				_ = mapping
+
 				agg.Add(enriched)
 			}
 		}()
 	}
 
-	// --- HTTP server ---
+	// --- HTTP server (health endpoint only) ---
 	mux := http.NewServeMux()
 	handler := promhttp.Handler()
 	if cfg.Server.BasicAuth.Enabled {
@@ -231,7 +225,7 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
-		log.Printf("Serving %s on %s", cfg.Server.MetricsPath, addr)
+		log.Printf("Health endpoint %s on %s", cfg.Server.MetricsPath, addr)
 		var srvErr error
 		if cfg.Server.TLS.Enabled {
 			srvErr = srv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
@@ -247,19 +241,19 @@ func main() {
 	if phaseMgr.Phase() == phase.PhaseMonitoring {
 		phaseStr = "monitoring"
 	}
-	log.Printf("eBPF adaptive agent active — host=%s phase=%s tracepoints=%d metrics=%d",
-		hostID, phaseStr, len(tracepoints), len(pollers))
+	log.Printf("eBPF adaptive agent active — host=%s phase=%s tracepoints=%d",
+		hostID, phaseStr, len(tracepoints))
 
 	// --- Graceful shutdown ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// --- Main loop ---
-	pollTicker := time.NewTicker(cfg.PollInterval)
-	defer pollTicker.Stop()
-
 	windowTicker := time.NewTicker(cfg.Baseline.AggregationWindow)
 	defer windowTicker.Stop()
+
+	healthTicker := time.NewTicker(5 * time.Second)
+	defer healthTicker.Stop()
 
 	for {
 		select {
@@ -270,12 +264,9 @@ func main() {
 			srv.Shutdown(shutdownCtx)
 			return
 
-		case <-pollTicker.C:
-			for _, p := range pollers {
-				p.Poll()
-			}
-			baselinePhaseGauge.With(hostLabel).Set(float64(phaseMgr.Phase()))
-			baselineProgressGauge.With(hostLabel).Set(phaseMgr.Progress())
+		case <-healthTicker.C:
+			baselinePhaseGauge.Set(float64(phaseMgr.Phase()))
+			baselineProgressGauge.Set(phaseMgr.Progress())
 
 		case <-windowTicker.C:
 			if hasRingbuf {

@@ -43,7 +43,7 @@ sudo ./ebpf-agent
 3. **Config**: Add the tracepoint and metric entries in `config.yaml`.
 4. **Aggregator**: Add the event type mapping in `internal/aggregator/aggregator.go`.
 5. **Tests**: Update `internal/config/config_test.go`.
-6. **Docs**: Update `README.md` and `ADAPTIVE_BASELINE_ARCHITECTURE.md`.
+6. **Docs**: Update `README.md` and `ARCHITECTURE.md`.
 
 ## Testing
 

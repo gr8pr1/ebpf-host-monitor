@@ -26,6 +26,7 @@ baseline:
   aggregation_window: 1m
   recalibration_interval: 24h
   ewma_alpha: 0.01
+  min_stddev: 1.0                    # floor to prevent +Inf z-scores on constant dimensions
   state_file: /var/lib/ebpf-agent/baseline.db
 
 # Anomaly scoring thresholds
@@ -33,6 +34,7 @@ scoring:
   zscore_threshold: 3.0
   quantile_threshold: 0.99
   minimum_samples: 60
+  cold_start_severity: warning       # severity for dimensions seen for the first time post-learning
 
 # Container monitoring (requires cgroup v2)
 container_monitoring:

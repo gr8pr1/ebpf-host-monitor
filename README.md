@@ -5,36 +5,47 @@
 [![Kernel](https://img.shields.io/badge/Kernel-5.8+-orange)](https://www.kernel.org/)
 [![eBPF](https://img.shields.io/badge/eBPF-Powered-blue)](https://ebpf.io/)
 
-A host-adapting security monitoring agent that uses eBPF to learn normal system behavior and detect anomalies. The agent operates in two phases: it first establishes per-host baselines through statistical analysis, then monitors for deviations using z-score anomaly detection.
+A host-adapting security monitoring agent that uses eBPF to learn normal system behavior and detect anomalies. The agent operates in two phases: it first establishes per-host baselines through statistical analysis, then monitors for deviations using z-score anomaly detection with context-aware MITRE ATT&CK mapping.
 
 ## How It Works
 
 The agent attaches eBPF programs to kernel tracepoints to observe syscalls at the kernel level. Events flow through a structured pipeline:
 
-1. **Kernel**: Tracepoint programs capture syscall metadata (pid, uid, cgroup, process name) and push structured events to a ringbuf, while also incrementing per-CPU counters for backward-compatible Prometheus metrics.
-2. **Enrichment**: The Go agent drains the ringbuf, resolves pids to binaries, uids to usernames, and cgroup IDs to container names.
-3. **Aggregation**: Events are bucketed into 1-minute windows per dimension (user, process, container, metric type).
-4. **Baselining**: A 168-bucket seasonal model (24 hours x 7 days) learns per-dimension means and standard deviations, with EWMA for drift adaptation.
-5. **Scoring**: Each window is scored against the baseline. Z-scores above the threshold are flagged as anomalies and exposed as Prometheus gauges.
+1. **Kernel**: Tracepoint programs capture syscall metadata (pid, uid, cgroup, process name) and push structured events to a ringbuf.
+2. **Enrichment**: The Go agent drains the ringbuf, resolves pids to binaries (with LRU caching), uids to usernames, and cgroup IDs to container names.
+3. **MITRE Mapping**: Each enriched event is mapped to MITRE ATT&CK techniques using context-aware resolution (binary path, comm, flags, destination port).
+4. **Aggregation**: Events are bucketed into 1-minute windows per dimension (user, process, container, metric type).
+5. **Baselining**: A 168-bucket seasonal model (24 hours x 7 days) learns per-dimension means and standard deviations, with EWMA for drift adaptation.
+6. **Scoring**: Each window is scored against the baseline with a minimum stddev floor to prevent false positives on constant-value dimensions. New dimensions seen after learning are flagged via cold-start policy.
 
 ### Two-Phase Operation
 
-**Phase 1 — Learning** (default: 7 days): The agent collects events and builds per-dimension, per-time-of-day baselines. Static fallback alerts remain active during this phase.
+**Phase 1 — Learning** (default: 7 days): The agent collects events and builds per-dimension, per-time-of-day baselines. High-value security events (ptrace, capset, suspicious connections) are still logged during this phase.
 
-**Phase 2 — Monitoring**: Each aggregation window is scored against the learned baseline. Anomalies are exposed as `ebpf_anomaly_score` metrics. The baseline slowly adapts via EWMA recalibration.
+**Phase 2 — Monitoring**: Each aggregation window is scored against the learned baseline. Anomalies are logged with severity, MITRE technique IDs, and full dimension context. The baseline slowly adapts via EWMA recalibration.
 
 ## MITRE ATT&CK Coverage
 
-| Technique | Name | Detection |
-|---|---|---|
-| T1059 | Command and Scripting Interpreter | `execve` tracing with per-user/per-process baselining |
-| T1548 | Abuse Elevation Control Mechanism | `sudo` detection, `setuid()`/`setgid()`, `capset()` |
-| T1003 | OS Credential Dumping | `openat()` on `/etc/shadow`, `/etc/passwd` reads |
-| T1055 | Process Injection | `ptrace()` monitoring |
-| T1071 | Application Layer Protocol (C2) | `connect()` with C2 port flagging, DNS query monitoring |
-| T1078 | Valid Accounts | `openat()` on `/etc/sudoers`, `authorized_keys` |
-| T1036 | Masquerading | Per-process syscall profiling detects unusual behavior per binary |
-| T1046 | Network Service Discovery | `bind()` monitoring for unexpected listening ports |
+The agent maps kernel events to MITRE techniques using enrichment context, not just event type. A single event can produce multiple technique attributions.
+
+| Technique | Name | Detection | Context-Aware |
+|---|---|---|---|
+| T1059.004 | Unix Shell | `execve` + comm=bash/sh/zsh | Binary path match |
+| T1059.006 | Python | `execve` + comm=python3 | Binary path match |
+| T1053.003 | Cron | `execve` + parent=crond | Parent process match |
+| T1036.003 | Rename System Utilities | `execve` + binary basename != comm | Name mismatch detection |
+| T1548.003 | Sudo and Sudo Caching | `execve` + sudo flag | BPF flag detection |
+| T1548.001 | Setuid and Setgid | `setuid()`/`setgid()`/`capset()` | Direct syscall |
+| T1003.008 | /etc/passwd and /etc/shadow | `openat()` on sensitive files | BPF flag detection |
+| T1055 | Process Injection | `ptrace()` | Direct syscall |
+| T1071.001 | Web Protocols | `connect()` to port 80/443 | Port-based classification |
+| T1571 | Non-Standard Port | `connect()` to C2 ports | BPF flag detection |
+| T1021.004 | SSH | `connect()` to port 22 | Port-based classification |
+| T1021 | Remote Services | `connect()` to RFC1918 ranges | IP range detection |
+| T1205 | Traffic Signaling | `bind()` on privileged port (<1024) | Port range check |
+| T1046 | Network Service Discovery | `bind()` on unprivileged port | Port range check |
+| T1071.004 | DNS | `sendto()` to port 53 | Port filter in BPF |
+| T1106 | Native API | `fork()` | Direct syscall |
 
 ## What It Monitors
 
@@ -71,7 +82,7 @@ sudo ./ebpf-agent
 sudo make install
 ```
 
-The agent exposes metrics on `http://localhost:9110/metrics`.
+The agent exposes a health endpoint on `http://localhost:9110/metrics` (agent operational metrics only).
 
 ## Configuration
 
@@ -82,8 +93,6 @@ server:
   port: 9110
   metrics_path: /metrics
 
-poll_interval: 1s
-
 host:
   id: ""  # auto-detected from /etc/machine-id
 
@@ -92,11 +101,13 @@ baseline:
   aggregation_window: 1m
   recalibration_interval: 24h
   ewma_alpha: 0.01
+  min_stddev: 1.0              # floor to prevent +Inf z-scores
   state_file: /var/lib/ebpf-agent/baseline.db
 
 scoring:
   zscore_threshold: 3.0
   minimum_samples: 60
+  cold_start_severity: warning # severity for new dimensions post-learning
 
 dimensions:
   per_user: true
@@ -117,44 +128,18 @@ make bpf MONITOR_CONNECT=0 MONITOR_PTRACE=0 MONITOR_DNS=0
 
 Available flags: `MONITOR_EXEC`, `MONITOR_SUDO`, `MONITOR_PASSWD`, `MONITOR_CONNECT`, `MONITOR_PTRACE`, `MONITOR_OPENAT`, `MONITOR_SETUID`, `MONITOR_FORK`, `MONITOR_EXIT`, `MONITOR_BIND`, `MONITOR_DNS`, `MONITOR_CAPSET`.
 
-## Metrics
+## Health Metrics
 
-### Raw Counters (with host label)
+The `/metrics` endpoint exposes agent operational health, not security detection output.
 
-| Metric | Description |
-|---|---|
-| `ebpf_exec_events_total` | Total execve syscalls |
-| `ebpf_sudo_events_total` | Total sudo executions |
-| `ebpf_passwd_read_events_total` | Total /etc/passwd reads |
-| `ebpf_connect_events_total` | Total outbound connect() |
-| `ebpf_suspicious_connect_events_total` | Connections to C2 ports |
-| `ebpf_ptrace_events_total` | Total ptrace() calls |
-| `ebpf_sensitive_file_access_total` | Sensitive file openat() |
-| `ebpf_setuid_events_total` | Total setuid() calls |
-| `ebpf_setgid_events_total` | Total setgid() calls |
-| `ebpf_fork_events_total` | Total fork events |
-| `ebpf_bind_events_total` | Total bind() calls |
-| `ebpf_dns_events_total` | Total DNS queries |
-| `ebpf_capset_events_total` | Total capset() calls |
-
-### Baseline & Anomaly Metrics
-
-| Metric | Type | Labels | Description |
-|---|---|---|---|
-| `ebpf_baseline_phase` | Gauge | `host` | 1=learning, 2=monitoring |
-| `ebpf_baseline_progress` | Gauge | `host` | 0.0-1.0 during learning |
-| `ebpf_baseline_mean` | Gauge | `host`, `metric`, `dimension` | Baseline mean |
-| `ebpf_baseline_stddev` | Gauge | `host`, `metric`, `dimension` | Baseline standard deviation |
-| `ebpf_baseline_upper_bound` | Gauge | `host`, `metric`, `dimension` | mean + threshold * stddev |
-| `ebpf_anomaly_score` | Gauge | `host`, `metric`, `dimension` | Latest z-score |
-| `ebpf_anomaly_total` | Counter | `host`, `metric`, `dimension`, `severity` | Cumulative anomaly count |
-
-## Prometheus Integration
-
-Example alert rules and scrape configuration are in `examples/prometheus/`. See:
-
-- `examples/prometheus/alerts.yml` — Adaptive baseline alerts plus static fallbacks
-- `examples/prometheus/scrape.yml` — Scrape config snippet
+| Metric | Type | Description |
+|---|---|---|
+| `ebpf_agent_info` | Gauge | Agent metadata: host, version |
+| `ebpf_baseline_phase` | Gauge | 1=learning, 2=monitoring |
+| `ebpf_baseline_progress` | Gauge | 0.0-1.0 during learning |
+| `ebpf_events_processed_total` | Counter | Total events through the pipeline |
+| `ebpf_ringbuf_drops_total` | Counter | Events dropped due to backpressure |
+| `ebpf_tracepoints_attached` | Gauge | Number of active tracepoints |
 
 ## Architecture
 
@@ -169,12 +154,12 @@ host/ebpf-agent/
 │   └── bpf/exec.bpf.o          # Embedded BPF object (generated by make bpf)
 ├── internal/
 │   ├── config/                  # YAML config parsing + validation
-│   ├── poller/                  # Per-CPU map counter poller
 │   ├── ringbuf/                 # Ringbuf consumer + event parsing
-│   ├── enricher/                # PID/UID/cgroup enrichment
+│   ├── enricher/                # PID/UID/cgroup enrichment (LRU-cached)
+│   ├── mitre/                   # Context-aware MITRE ATT&CK mapper
 │   ├── aggregator/              # Time-window bucketing
 │   ├── baseline/                # 168-bucket seasonal model + EWMA
-│   ├── scorer/                  # Z-score anomaly detection
+│   ├── scorer/                  # Z-score anomaly detection + cold-start
 │   ├── store/                   # SQLite state persistence
 │   └── phase/                   # Learning/monitoring phase management
 ├── examples/prometheus/         # Alert rules and scrape config
@@ -208,7 +193,7 @@ sudo bpftool map dump name exec_counter
 
 - **Packet payload inspection** — sees destination port/IP but not data content
 - **Fileless malware** — `memfd_create` + `execveat` bypasses the `execve` tracepoint
-- **Cross-host correlation** — each agent is independent
+- **Cross-host correlation** — each agent is independent (planned: OTel-based fleet correlation)
 - **Kernel rootkits** — malicious kernel modules can hide events from eBPF
 - **DNS tunneling** — counts DNS queries but does not inspect query content
 - **LD_PRELOAD injection** — shared library hijacking does not trigger `ptrace()` or `execve()`
@@ -217,14 +202,14 @@ sudo bpftool map dump name exec_counter
 
 - Requires root privileges for tracepoint attachment
 - Baseline state file (`/var/lib/ebpf-agent/baseline.db`) must be root-owned (0600) to prevent baseline poisoning
-- EWMA drift adaptation means an attacker slowly escalating over weeks could shift the baseline — set absolute ceiling alerts alongside relative ones
-- During the learning phase, only static fallback alerts are active
-- Enable TLS and basic auth on the metrics endpoint in production
+- EWMA drift adaptation means an attacker slowly escalating over weeks could shift the baseline — set absolute ceiling thresholds alongside relative z-score detection
+- During the learning phase, high-value security events (ptrace, capset, suspicious connections) are still logged
+- Enricher PID resolution can fail for short-lived processes (TOCTOU) — failures are explicitly logged with `ENRICH-FAIL`
+- Enable TLS and basic auth on the health endpoint in production
 
-## Additional Documentation
+## Contributing
 
-- **[ADAPTIVE_BASELINE_ARCHITECTURE.md](ADAPTIVE_BASELINE_ARCHITECTURE.md)**: Detailed architecture design
-- **[CONTRIBUTING.md](CONTRIBUTING.md)**: Contribution guidelines
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 ## License
 

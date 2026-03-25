@@ -45,13 +45,15 @@ type BaselineConfig struct {
 	AggregationWindow     time.Duration `yaml:"aggregation_window"`
 	RecalibrationInterval time.Duration `yaml:"recalibration_interval"`
 	EWMAAlpha             float64       `yaml:"ewma_alpha"`
+	MinStdDev             float64       `yaml:"min_stddev"`
 	StateFile             string        `yaml:"state_file"`
 }
 
 type ScoringConfig struct {
-	ZScoreThreshold    float64 `yaml:"zscore_threshold"`
-	QuantileThreshold  float64 `yaml:"quantile_threshold"`
-	MinimumSamples     int     `yaml:"minimum_samples"`
+	ZScoreThreshold      float64 `yaml:"zscore_threshold"`
+	QuantileThreshold    float64 `yaml:"quantile_threshold"`
+	MinimumSamples       int     `yaml:"minimum_samples"`
+	ColdStartSeverity    string  `yaml:"cold_start_severity"`
 }
 
 type HostConfig struct {
@@ -104,12 +106,14 @@ func Load(path string) (*Config, error) {
 			AggregationWindow:     time.Minute,
 			RecalibrationInterval: 24 * time.Hour,
 			EWMAAlpha:             0.01,
+			MinStdDev:             1.0,
 			StateFile:             "/var/lib/ebpf-agent/baseline.db",
 		},
 		Scoring: ScoringConfig{
 			ZScoreThreshold:   3.0,
 			QuantileThreshold: 0.99,
 			MinimumSamples:    60,
+			ColdStartSeverity: "warning",
 		},
 		Container: ContainerConfig{
 			CgroupRoot: "/sys/fs/cgroup",

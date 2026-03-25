@@ -55,6 +55,12 @@ metrics:
 	if cfg.Scoring.ZScoreThreshold != 3.0 {
 		t.Errorf("expected default zscore_threshold 3.0, got %f", cfg.Scoring.ZScoreThreshold)
 	}
+	if cfg.Baseline.MinStdDev != 1.0 {
+		t.Errorf("expected default min_stddev 1.0, got %f", cfg.Baseline.MinStdDev)
+	}
+	if cfg.Scoring.ColdStartSeverity != "warning" {
+		t.Errorf("expected default cold_start_severity 'warning', got %s", cfg.Scoring.ColdStartSeverity)
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
