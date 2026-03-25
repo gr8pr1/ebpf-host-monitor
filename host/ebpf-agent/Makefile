@@ -55,8 +55,10 @@ endif
 
 all: bpf build
 
+CLANG ?= $(shell which clang 2>/dev/null || echo /usr/bin/clang)
+
 bpf:
-	cd bpf && clang -O2 -g -target bpf $(BPF_FLAGS) -c exec.bpf.c -o exec.bpf.o
+	cd bpf && $(CLANG) -O2 -g -target bpf $(BPF_FLAGS) -c exec.bpf.c -o exec.bpf.o
 	mkdir -p cmd/agent/bpf
 	cp bpf/exec.bpf.o cmd/agent/bpf/
 

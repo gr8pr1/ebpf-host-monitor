@@ -34,11 +34,14 @@ case $OS in
     centos|rhel|fedora)
         yum install -y kernel-devel clang llvm golang curl
         ;;
+    arch|manjaro|endeavouros)
+        pacman -Sy --needed --noconfirm linux-headers clang llvm go curl
+        ;;
     *)
         echo "Warning: Unsupported OS. Please install dependencies manually:"
         echo "  - linux-headers / kernel-devel"
         echo "  - clang and llvm"
-        echo "  - golang"
+        echo "  - golang 1.24+"
         exit 1
         ;;
 esac
@@ -90,12 +93,13 @@ echo "=========================================="
 echo "Installation complete!"
 echo "=========================================="
 echo ""
-echo "Metrics endpoint: http://localhost:9110/metrics"
+echo "Health endpoint: http://localhost:9110/metrics (agent operational health only)"
 echo ""
 echo "Test it with: curl http://localhost:9110/metrics"
 echo ""
 echo "Next steps:"
-echo "1. Deploy the monitoring stack (see monitoring/README.md)"
-echo "2. Configure Prometheus to scrape this host"
-echo "3. Set up Grafana dashboards"
+echo "1. The agent is now in learning phase (default: 7 days)"
+echo "2. Set up an OTel Collector to receive detection output (OTLP gRPC on port 4317)"
+echo "3. Configure otel.enabled: true in /etc/ebpf-agent/config.yaml"
+echo "4. View logs: sudo journalctl -u ebpf-agent -f"
 echo ""
