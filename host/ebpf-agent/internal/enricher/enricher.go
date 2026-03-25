@@ -11,11 +11,12 @@ import (
 )
 
 type EnrichedEvent struct {
-	Raw       *ringbuf.Event
-	Binary    string
-	Username  string
-	Container string
-	Resolved  bool
+	Raw        *ringbuf.Event
+	Binary     string
+	Username   string
+	Container  string
+	Resolved   bool
+	MitreTags  []string
 }
 
 type pidEntry struct {

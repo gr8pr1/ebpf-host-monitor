@@ -42,8 +42,9 @@ sudo ./ebpf-agent
 2. **Makefile**: Add the new flag to the Makefile.
 3. **Config**: Add the tracepoint and metric entries in `config.yaml`.
 4. **Aggregator**: Add the event type mapping in `internal/aggregator/aggregator.go`.
-5. **Tests**: Update `internal/config/config_test.go`.
-6. **Docs**: Update `README.md` and `ARCHITECTURE.md`.
+5. **MITRE Mapper**: Add the technique mapping in `internal/mitre/mitre.go`.
+6. **Tests**: Update `internal/config/config_test.go`.
+7. **Docs**: Update `README.md` and `ARCHITECTURE.md`.
 
 ## Testing
 

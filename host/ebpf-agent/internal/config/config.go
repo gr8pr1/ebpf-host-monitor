@@ -136,10 +136,6 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid port: %d", cfg.Server.Port)
 	}
 
-	if len(cfg.Metrics) == 0 {
-		return nil, fmt.Errorf("no metrics defined in config")
-	}
-
 	if len(cfg.Tracepoints) == 0 {
 		return nil, fmt.Errorf("no tracepoints defined in config")
 	}

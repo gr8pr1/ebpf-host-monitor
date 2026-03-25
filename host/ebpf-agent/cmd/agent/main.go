@@ -193,6 +193,7 @@ func main() {
 	}
 
 	if hasRingbuf && rbConsumer != nil {
+		rbConsumer.SetDropCallback(func() { ringbufDrops.Add(1) })
 		go rbConsumer.Run()
 		defer rbConsumer.Close()
 
@@ -202,11 +203,13 @@ func main() {
 				enriched := enrich.Enrich(ev)
 
 				mapping := mitre.Map(enriched)
+				for _, t := range mapping.Techniques {
+					enriched.MitreTags = append(enriched.MitreTags, t.ID)
+				}
 				if !enriched.Resolved {
 					log.Printf("ENRICH-FAIL pid=%d comm=%s (process exited before resolution)",
 						ev.PID, ev.CommString())
 				}
-				_ = mapping
 
 				agg.Add(enriched)
 			}

@@ -116,8 +116,8 @@ metrics: []
 	f.Close()
 
 	_, err = Load(f.Name())
-	if err == nil {
-		t.Fatal("expected error for empty metrics")
+	if err != nil {
+		t.Fatalf("empty metrics should be valid (pollers removed), got: %v", err)
 	}
 }
 

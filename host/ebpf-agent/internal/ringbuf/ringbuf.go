@@ -75,6 +75,7 @@ type Consumer struct {
 	reader *cringbuf.Reader
 	out    chan *Event
 	done   chan struct{}
+	onDrop func()
 }
 
 func NewConsumer(eventsMap *ebpf.Map, bufSize int) (*Consumer, error) {
@@ -89,6 +90,10 @@ func NewConsumer(eventsMap *ebpf.Map, bufSize int) (*Consumer, error) {
 		done:   make(chan struct{}),
 	}
 	return c, nil
+}
+
+func (c *Consumer) SetDropCallback(fn func()) {
+	c.onDrop = fn
 }
 
 func (c *Consumer) Events() <-chan *Event {
@@ -118,7 +123,9 @@ func (c *Consumer) Run() {
 		select {
 		case c.out <- ev:
 		default:
-			// Drop event if channel is full (backpressure)
+			if c.onDrop != nil {
+				c.onDrop()
+			}
 		}
 	}
 }

@@ -27,8 +27,8 @@ var scriptInterpreters = map[string]Technique{
 	"python":  {ID: "T1059.006", Name: "Python", Tactic: "Execution"},
 	"python2": {ID: "T1059.006", Name: "Python", Tactic: "Execution"},
 	"python3": {ID: "T1059.006", Name: "Python", Tactic: "Execution"},
-	"perl":    {ID: "T1059.006", Name: "Python", Tactic: "Execution"},
-	"ruby":    {ID: "T1059.006", Name: "Python", Tactic: "Execution"},
+	"perl":    {ID: "T1059.006", Name: "Perl", Tactic: "Execution"},
+	"ruby":    {ID: "T1059.006", Name: "Ruby", Tactic: "Execution"},
 	"node":    {ID: "T1059.007", Name: "JavaScript", Tactic: "Execution"},
 	"lua":     {ID: "T1059", Name: "Command and Scripting Interpreter", Tactic: "Execution"},
 }
@@ -74,7 +74,10 @@ func Map(ev *enricher.EnrichedEvent) Mapping {
 
 func mapExec(ev *enricher.EnrichedEvent) Mapping {
 	comm := ev.Raw.CommString()
-	base := filepath.Base(ev.Binary)
+	var base string
+	if ev.Binary != "" {
+		base = filepath.Base(ev.Binary)
+	}
 	var techniques []Technique
 
 	if ev.Raw.Flags&ringbuf.FlagSudo != 0 {
