@@ -161,6 +161,8 @@ The `/metrics` endpoint exposes agent operational health, not security detection
 
 ## Architecture
 
+Additional Mermaid diagrams (system context, pipeline, phases, telemetry): see **[diagram.md](diagram.md)** in the repo root.
+
 Data flows from kernel tracepoints through a ringbuf into userspace enrichment, MITRE tagging, time-window aggregation, and seasonal baselining. In the monitoring phase, anomalies are **logged** (journald); `/metrics` exposes **agent health only** (not z-scores or per-metric counters).
 
 ```mermaid
