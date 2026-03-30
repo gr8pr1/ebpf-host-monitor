@@ -144,6 +144,38 @@ The `/metrics` endpoint exposes agent operational health, not security detection
 
 ## Architecture
 
+Data flows from kernel tracepoints through a ringbuf into userspace enrichment, MITRE tagging, time-window aggregation, and seasonal baselining. Anomaly scores and logs are emitted in the monitoring phase; `/metrics` exposes agent health only.
+
+```mermaid
+flowchart LR
+    subgraph K["Kernel"]
+        TP["Tracepoints"]
+        RB["RingBuf events"]
+        TP --> RB
+    end
+
+    subgraph G["Go agent"]
+        RC["RingBuf consumer"]
+        EN["Enricher"]
+        MT["MITRE mapper"]
+        AG["Aggregator"]
+        BL["Baseline engine"]
+        ST["SQLite store"]
+        PH["Phase manager"]
+        SC["Scorer"]
+        LOG["Logs journald"]
+        HM["Health /metrics"]
+    end
+
+    RB --> RC --> EN --> MT
+    MT --> AG
+    AG -->|"rotate window"| PH
+    PH --> BL
+    BL <--> ST
+    PH --> SC --> LOG
+    PH --> HM
+```
+
 ```
 host/ebpf-agent/
 ├── bpf/
