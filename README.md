@@ -22,7 +22,7 @@ The agent attaches eBPF programs to kernel tracepoints to observe syscalls at th
 
 **Phase 1 — Learning** (default: 7 days): The agent collects events and builds per-dimension, per-time-of-day baselines. High-value security events (ptrace, capset, suspicious connections) are still logged during this phase.
 
-**Phase 2 — Monitoring**: Each aggregation window is scored against the learned baseline. Anomalies are logged with severity, MITRE technique IDs, and full dimension context. The baseline slowly adapts via EWMA recalibration.
+**Phase 2 — Monitoring**: Each aggregation window is scored against the learned baseline. Anomalies are written to **journald** (severity, z-score, dimension). MITRE technique IDs are computed per event in-process (`MitreTags` on enriched events); they are not yet exported via OpenTelemetry. The baseline slowly adapts via EWMA recalibration.
 
 ## MITRE ATT&CK Coverage
 
@@ -32,7 +32,7 @@ The agent maps kernel events to MITRE techniques using enrichment context, not j
 |---|---|---|---|
 | T1059.004 | Unix Shell | `execve` + comm=bash/sh/zsh | Binary path match |
 | T1059.006 | Python | `execve` + comm=python3 | Binary path match |
-| T1053.003 | Cron | `execve` + parent=crond | Parent process match |
+| T1053.003 | Cron | `execve` + comm in cron/crond/anacron/atd | Process `comm` match |
 | T1036.003 | Rename System Utilities | `execve` + binary basename != comm | Name mismatch detection |
 | T1548.003 | Sudo and Sudo Caching | `execve` + sudo flag | BPF flag detection |
 | T1548.001 | Setuid and Setgid | `setuid()`/`setgid()`/`capset()` | Direct syscall |
@@ -70,24 +70,26 @@ The agent maps kernel events to MITRE techniques using enrichment context, not j
 
 ## Quick Start
 
+From the repo root you can use `scripts/quick-start.sh` (installs build deps on Debian/Ubuntu, Arch, or RHEL-family, then builds and optionally installs the systemd unit), or build manually:
+
 ```bash
 cd host/ebpf-agent
 
-# Build eBPF programs and Go binary
+# Build eBPF programs and Go binary (requires clang, libbpf headers, kernel headers)
 make all
 
-# Run (requires root)
+# Run (requires root; reads ./config.yaml in the current directory)
 sudo ./ebpf-agent
 
-# Or install as a systemd service
+# Or install as a systemd service (uses /etc/ebpf-agent/config.yaml)
 sudo make install
 ```
 
-The agent exposes a health endpoint on `http://localhost:9110/metrics` (agent operational metrics only).
+The agent exposes a health endpoint on `http://localhost:9110/metrics` (operational metrics only — not anomaly scores). Anomalies and `ENRICH-FAIL` lines go to **journald**: `sudo journalctl -u ebpf-agent -f`.
 
 ## Configuration
 
-The agent is configured via `config.yaml`:
+The agent reads `config.yaml` from the working directory (or pass `-config /path/to/config.yaml`). **At least one `tracepoints` entry is required** — copy the full `tracepoints:` and optional `metrics:` sections from `host/ebpf-agent/config.yaml` in the repo; the snippet below shows only the adaptive-baseline knobs.
 
 ```yaml
 server:
@@ -117,6 +119,13 @@ dimensions:
   network: true
   filesystem: true
   scheduling: true
+
+# Required: list every tracepoint to attach (see config.yaml in repo for full list)
+tracepoints:
+  - group: syscalls
+    name: sys_enter_execve
+    program: trace_exec
+  # ... add remaining programs from host/ebpf-agent/config.yaml
 ```
 
 ### Feature Flags
@@ -142,9 +151,17 @@ The `/metrics` endpoint exposes agent operational health, not security detection
 | `ebpf_ringbuf_drops_total` | Counter | Events dropped due to backpressure |
 | `ebpf_tracepoints_attached` | Gauge | Number of active tracepoints |
 
+## OpenTelemetry
+
+**OpenTelemetry is not implemented yet.** There is no `internal/otelexport/` package, no OTLP client, and no `otel:` block in config — the agent does not push traces, logs, or metrics to a collector.
+
+**What exists today:** detection and anomalies go to **journald** (`log.Printf`); operational health is on **`/metrics`** (Prometheus format).
+
+**Planned:** OTLP export for anomaly spans, structured security event logs, and pushed metrics (see design notes if you maintain a private `ARCHITECTURE.md`). Until that lands, treat any OTel mention in discussions as a **roadmap** item, not a feature you can enable in this repo.
+
 ## Architecture
 
-Data flows from kernel tracepoints through a ringbuf into userspace enrichment, MITRE tagging, time-window aggregation, and seasonal baselining. Anomaly scores and logs are emitted in the monitoring phase; `/metrics` exposes agent health only.
+Data flows from kernel tracepoints through a ringbuf into userspace enrichment, MITRE tagging, time-window aggregation, and seasonal baselining. In the monitoring phase, anomalies are **logged** (journald); `/metrics` exposes **agent health only** (not z-scores or per-metric counters).
 
 ```mermaid
 flowchart LR
@@ -180,8 +197,7 @@ flowchart LR
 host/ebpf-agent/
 ├── bpf/
 │   ├── exec.bpf.c              # eBPF programs (all tracepoints + ringbuf)
-│   ├── bpf_helpers.h            # BPF helper definitions
-│   └── vmlinux.h               # Kernel type definitions
+│   └── vmlinux.h                 # Kernel type definitions (libbpf headers from system)
 ├── cmd/agent/
 │   ├── main.go                 # Entry point, wires all components
 │   └── bpf/exec.bpf.o          # Embedded BPF object (generated by make bpf)
@@ -195,7 +211,7 @@ host/ebpf-agent/
 │   ├── scorer/                  # Z-score anomaly detection + cold-start
 │   ├── store/                   # SQLite state persistence
 │   └── phase/                   # Learning/monitoring phase management
-├── examples/prometheus/         # Alert rules and scrape config
+├── examples/prometheus/         # Health-only scrape + alert examples
 ├── config.yaml
 ├── Makefile
 ├── ebpf-agent.service
@@ -217,10 +233,13 @@ make build
 # Run tests
 make test
 
-# Inspect eBPF maps at runtime
+# Inspect eBPF maps at runtime (map names depend on your BPF build)
 sudo bpftool map list
-sudo bpftool map dump name exec_counter
 ```
+
+### Prometheus
+
+The agent does **not** export per-event counters or anomaly gauges to Prometheus anymore — only **health** metrics (phase, progress, events processed, ringbuf drops, tracepoints attached). Use `examples/prometheus/scrape.yml` and `examples/prometheus/alerts.yml` for availability and pipeline-health alerting. For detection, rely on **journald** until OpenTelemetry export is implemented.
 
 ## What This Doesn't Detect
 
