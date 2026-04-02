@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-04-03 — Next implementation priorities (documented)
+
+**What:** Recorded the **post-roadmap backlog** (what to build after the full implementation plan in `state.md` dated 2026-04-02) in **`ARCHITECTURE.md`** under *Next implementation priorities*, and refreshed the **Implementation Status** table there so OTel/MAD rows match shipped code.
+
+**Why:** The six-phase roadmap + `issues.md` items are done; future work is follow-ups (OTel LogRecords, cold-start fast-track wiring, ARCHITECTURE metric catalog, kill-chain, ops, testing). Single place in ARCHITECTURE + this log for planning.
+
+**See:** [ARCHITECTURE.md](ARCHITECTURE.md) § Implementation Status and § Next implementation priorities.
+
+**Note:** `ARCHITECTURE.md` was removed from `.gitignore` so this section is tracked in git with the repo.
+
+---
+
 ## 2026-04-02 — Docs, gitignore, OTel protocol guard
 
 **What:** Removed `CLAUDE.md` from `.gitignore` so the tracked workspace rules file is not ignored; added `.cursor/` to `.gitignore`. Updated **issues.md** (all Fixed) and **README** (OTel/TLS, health metrics, Phase 2 / MITRE / `ebpf_otel_export_errors_total` accuracy). **`otelexport.Init`** returns an error if `otel.protocol` is not `grpc`. **`EmitSecurityEvent`** adds `mitre.technique.ids` when present. Config **`headers`** / **`batch`** documented as reserved in YAML and struct tags. **CLAUDE.md** dependency name aligned with **go.mod**.
