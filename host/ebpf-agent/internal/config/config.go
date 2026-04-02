@@ -34,26 +34,22 @@ type TracepointConfig struct {
 	Program string `yaml:"program"`
 }
 
-type MetricConfig struct {
-	Name   string `yaml:"name"`
-	Help   string `yaml:"help"`
-	BPFMap string `yaml:"bpf_map"`
-}
-
 type BaselineConfig struct {
-	LearningDuration      time.Duration `yaml:"learning_duration"`
-	AggregationWindow     time.Duration `yaml:"aggregation_window"`
-	RecalibrationInterval time.Duration `yaml:"recalibration_interval"`
-	EWMAAlpha             float64       `yaml:"ewma_alpha"`
-	MinStdDev             float64       `yaml:"min_stddev"`
-	StateFile             string        `yaml:"state_file"`
+	LearningDuration       time.Duration `yaml:"learning_duration"`
+	AggregationWindow      time.Duration `yaml:"aggregation_window"`
+	RecalibrationInterval  time.Duration `yaml:"recalibration_interval"`
+	EWMAAlpha              float64       `yaml:"ewma_alpha"`
+	MinStdDev              float64       `yaml:"min_stddev"`
+	StateFile              string        `yaml:"state_file"`
+	NewDimensionLearnWindow time.Duration `yaml:"new_dimension_learn_window"` // fast-track for cold-start dimensions
 }
 
 type ScoringConfig struct {
-	ZScoreThreshold      float64 `yaml:"zscore_threshold"`
-	QuantileThreshold    float64 `yaml:"quantile_threshold"`
-	MinimumSamples       int     `yaml:"minimum_samples"`
-	ColdStartSeverity    string  `yaml:"cold_start_severity"`
+	ZScoreThreshold   float64            `yaml:"zscore_threshold"`
+	MinimumSamples    int                `yaml:"minimum_samples"`
+	ColdStartSeverity string             `yaml:"cold_start_severity"`
+	MADEnabled        bool               `yaml:"mad_enabled"`
+	Ceilings          map[string]float64 `yaml:"ceilings"` // per-metric hard caps (observed > ceiling => anomaly)
 }
 
 type HostConfig struct {
@@ -75,17 +71,37 @@ type DimensionsConfig struct {
 	Scheduling   bool `yaml:"scheduling"`
 }
 
+// OTelConfig configures OpenTelemetry export (primary telemetry path).
+type OTelConfig struct {
+	Enabled              bool              `yaml:"enabled"`
+	Endpoint             string            `yaml:"endpoint"`
+	Protocol             string            `yaml:"protocol"` // grpc only (http not implemented)
+	Insecure             bool              `yaml:"insecure"`
+	Headers              map[string]string `yaml:"headers"` // reserved: not applied to gRPC dial yet
+	ExportMetrics        bool              `yaml:"export_metrics"`
+	ExportTraces         bool              `yaml:"export_traces"`
+	ExportLogs           bool              `yaml:"export_logs"`
+	MetricExportInterval time.Duration     `yaml:"metric_export_interval"`
+	Sampling             map[string]float64 `yaml:"sampling"`
+	Batch                OTelBatchConfig   `yaml:"batch"` // reserved: SDK defaults used in otelexport
+	ResourceAttributes   map[string]string `yaml:"resource_attributes"`
+}
+
+type OTelBatchConfig struct {
+	MaxQueueSize     int           `yaml:"max_queue_size"`
+	MaxExportBatch   int           `yaml:"max_export_batch"`
+	ExportTimeout    time.Duration `yaml:"export_timeout"`
+}
+
 type Config struct {
-	Server       ServerConfig       `yaml:"server"`
-	PollInterval time.Duration      `yaml:"poll_interval"`
-	BPFObject    string             `yaml:"bpf_object"`
-	Tracepoints  []TracepointConfig `yaml:"tracepoints"`
-	Metrics      []MetricConfig     `yaml:"metrics"`
-	Baseline     BaselineConfig     `yaml:"baseline"`
-	Scoring      ScoringConfig      `yaml:"scoring"`
-	Host         HostConfig         `yaml:"host"`
-	Container    ContainerConfig    `yaml:"container_monitoring"`
-	Dimensions   DimensionsConfig   `yaml:"dimensions"`
+	Server      ServerConfig       `yaml:"server"`
+	Tracepoints []TracepointConfig `yaml:"tracepoints"`
+	Baseline    BaselineConfig     `yaml:"baseline"`
+	Scoring     ScoringConfig      `yaml:"scoring"`
+	Host        HostConfig         `yaml:"host"`
+	Container   ContainerConfig    `yaml:"container_monitoring"`
+	Dimensions  DimensionsConfig   `yaml:"dimensions"`
+	OTel        OTelConfig         `yaml:"otel"`
 }
 
 func Load(path string) (*Config, error) {
@@ -99,21 +115,20 @@ func Load(path string) (*Config, error) {
 			Port:        9110,
 			MetricsPath: "/metrics",
 		},
-		PollInterval: time.Second,
-		BPFObject:    "bpf/exec.bpf.o",
 		Baseline: BaselineConfig{
-			LearningDuration:      168 * time.Hour,
-			AggregationWindow:     time.Minute,
-			RecalibrationInterval: 24 * time.Hour,
-			EWMAAlpha:             0.01,
-			MinStdDev:             1.0,
-			StateFile:             "/var/lib/ebpf-agent/baseline.db",
+			LearningDuration:        168 * time.Hour,
+			AggregationWindow:       time.Minute,
+			RecalibrationInterval:     24 * time.Hour,
+			EWMAAlpha:                 0.01,
+			MinStdDev:                 1.0,
+			StateFile:                 "/var/lib/ebpf-agent/baseline.db",
+			NewDimensionLearnWindow:   24 * time.Hour,
 		},
 		Scoring: ScoringConfig{
 			ZScoreThreshold:   3.0,
-			QuantileThreshold: 0.99,
-			MinimumSamples:    60,
+			MinimumSamples:      60,
 			ColdStartSeverity: "warning",
+			Ceilings:            map[string]float64{},
 		},
 		Container: ContainerConfig{
 			CgroupRoot: "/sys/fs/cgroup",
@@ -125,6 +140,25 @@ func Load(path string) (*Config, error) {
 			Network:      true,
 			FileSystem:   true,
 			Scheduling:   true,
+		},
+		OTel: OTelConfig{
+			Protocol:             "grpc",
+			Insecure:             true,
+			ExportMetrics:        true,
+			ExportTraces:         true,
+			ExportLogs:           true,
+			MetricExportInterval: 60 * time.Second,
+			Batch: OTelBatchConfig{
+				MaxQueueSize:   8192,
+				MaxExportBatch: 512,
+				ExportTimeout:  30 * time.Second,
+			},
+			Sampling: map[string]float64{
+				"ptrace": 1.0, "suspicious_connect": 1.0, "capset": 1.0,
+				"sensitive_file": 1.0, "setuid": 1.0, "sudo": 1.0,
+				"bind": 0.1, "connect": 0.01, "dns": 0.01, "exec": 0.01,
+				"fork": 0, "exit": 0,
+			},
 		},
 	}
 
@@ -146,6 +180,10 @@ func Load(path string) (*Config, error) {
 
 	if cfg.Host.ID == "" {
 		cfg.Host.ID = detectHostID()
+	}
+
+	if cfg.Scoring.Ceilings == nil {
+		cfg.Scoring.Ceilings = map[string]float64{}
 	}
 
 	return cfg, nil

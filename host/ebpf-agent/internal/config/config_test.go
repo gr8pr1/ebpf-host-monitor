@@ -10,16 +10,10 @@ func TestLoadValidConfig(t *testing.T) {
 server:
   port: 9110
   metrics_path: /metrics
-poll_interval: 1s
-bpf_object: bpf/exec.bpf.o
 tracepoints:
   - group: syscalls
     name: sys_enter_execve
     program: trace_exec
-metrics:
-  - name: ebpf_exec_events_total
-    help: "Total exec events"
-    bpf_map: exec_counter
 `
 	f, err := os.CreateTemp("", "config-*.yaml")
 	if err != nil {
@@ -36,12 +30,6 @@ metrics:
 
 	if cfg.Server.Port != 9110 {
 		t.Errorf("expected port 9110, got %d", cfg.Server.Port)
-	}
-	if len(cfg.Metrics) != 1 {
-		t.Errorf("expected 1 metric, got %d", len(cfg.Metrics))
-	}
-	if cfg.Metrics[0].BPFMap != "exec_counter" {
-		t.Errorf("expected bpf_map exec_counter, got %s", cfg.Metrics[0].BPFMap)
 	}
 	if len(cfg.Tracepoints) != 1 {
 		t.Errorf("expected 1 tracepoint, got %d", len(cfg.Tracepoints))
@@ -78,10 +66,6 @@ tracepoints:
   - group: syscalls
     name: sys_enter_execve
     program: trace_exec
-metrics:
-  - name: test
-    help: test
-    bpf_map: test
 `
 	f, err := os.CreateTemp("", "config-*.yaml")
 	if err != nil {
@@ -97,39 +81,11 @@ metrics:
 	}
 }
 
-func TestLoadNoMetrics(t *testing.T) {
-	content := `
-server:
-  port: 9110
-tracepoints:
-  - group: syscalls
-    name: sys_enter_execve
-    program: trace_exec
-metrics: []
-`
-	f, err := os.CreateTemp("", "config-*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name())
-	f.WriteString(content)
-	f.Close()
-
-	_, err = Load(f.Name())
-	if err != nil {
-		t.Fatalf("empty metrics should be valid (pollers removed), got: %v", err)
-	}
-}
-
 func TestLoadNoTracepoints(t *testing.T) {
 	content := `
 server:
   port: 9110
 tracepoints: []
-metrics:
-  - name: test
-    help: test
-    bpf_map: test
 `
 	f, err := os.CreateTemp("", "config-*.yaml")
 	if err != nil {
@@ -155,10 +111,6 @@ tracepoints:
   - group: syscalls
     name: sys_enter_execve
     program: trace_exec
-metrics:
-  - name: test
-    help: test
-    bpf_map: test
 `
 	f, err := os.CreateTemp("", "config-*.yaml")
 	if err != nil {
@@ -196,10 +148,6 @@ tracepoints:
   - group: syscalls
     name: sys_enter_execve
     program: trace_exec
-metrics:
-  - name: test
-    help: test
-    bpf_map: test
 `
 	f, err := os.CreateTemp("", "config-*.yaml")
 	if err != nil {
@@ -248,10 +196,6 @@ tracepoints:
   - group: syscalls
     name: sys_enter_execve
     program: trace_exec
-metrics:
-  - name: test
-    help: test
-    bpf_map: test
 `
 	f, err := os.CreateTemp("", "config-*.yaml")
 	if err != nil {

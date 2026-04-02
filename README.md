@@ -22,7 +22,7 @@ The agent attaches eBPF programs to kernel tracepoints to observe syscalls at th
 
 **Phase 1 — Learning** (default: 7 days): The agent collects events and builds per-dimension, per-time-of-day baselines. High-value security events (ptrace, capset, suspicious connections) are still logged during this phase.
 
-**Phase 2 — Monitoring**: Each aggregation window is scored against the learned baseline. Anomalies are written to **journald** (severity, z-score, dimension). MITRE technique IDs are computed per event in-process (`MitreTags` on enriched events); they are not yet exported via OpenTelemetry. The baseline slowly adapts via EWMA recalibration.
+**Phase 2 — Monitoring**: Each aggregation window is scored against the learned baseline. Anomalies are emitted to **OpenTelemetry** (when `otel.enabled`) and **journald** (severity, z-score, dimension). MITRE technique IDs are attached to enriched events; **security-event** OTLP spans include `mitre.technique.ids` when trace export is on. **Anomaly** spans carry scoring metrics (z-score, dimension, window) but not per-event MITRE tags. The baseline slowly adapts via EWMA recalibration.
 
 ## MITRE ATT&CK Coverage
 
@@ -85,11 +85,11 @@ sudo ./ebpf-agent
 sudo make install
 ```
 
-The agent exposes a health endpoint on `http://localhost:9110/metrics` (operational metrics only — not anomaly scores). Anomalies and `ENRICH-FAIL` lines go to **journald**: `sudo journalctl -u ebpf-agent -f`.
+The agent exposes a health endpoint on `http://localhost:9110/metrics` (operational metrics only — not anomaly scores). Anomalies and `ENRICH-FAIL` lines go to **stderr/journald**; when **`otel.enabled: true`**, detection output is also sent via **OTLP** (see `host/ebpf-agent/config.yaml`).
 
 ## Configuration
 
-The agent reads `config.yaml` from the working directory (or pass `-config /path/to/config.yaml`). **At least one `tracepoints` entry is required** — copy the full `tracepoints:` and optional `metrics:` sections from `host/ebpf-agent/config.yaml` in the repo; the snippet below shows only the adaptive-baseline knobs.
+The agent reads `config.yaml` from the working directory (or pass `-config /path/to/config.yaml`). **At least one `tracepoints` entry is required** — copy the full `tracepoints:` list from `host/ebpf-agent/config.yaml` in the repo; the snippet below shows only the adaptive-baseline knobs (add `otel:` when using a collector).
 
 ```yaml
 server:
@@ -149,21 +149,23 @@ The `/metrics` endpoint exposes agent operational health, not security detection
 | `ebpf_baseline_progress` | Gauge | 0.0-1.0 during learning |
 | `ebpf_events_processed_total` | Counter | Total events through the pipeline |
 | `ebpf_ringbuf_drops_total` | Counter | Events dropped due to backpressure |
+| `ebpf_enrichment_failures_total` | Counter | PID/binary resolution failures |
+| `ebpf_otel_export_errors_total` | Counter | OTel provider shutdown failures (incremented on `Shutdown` error) |
 | `ebpf_tracepoints_attached` | Gauge | Number of active tracepoints |
 
 ## OpenTelemetry
 
-**OpenTelemetry is not implemented yet.** There is no `internal/otelexport/` package, no OTLP client, and no `otel:` block in config — the agent does not push traces, logs, or metrics to a collector.
+Set **`otel.enabled: true`** and point **`otel.endpoint`** at an OpenTelemetry Collector (**OTLP gRPC only**; default port **4317**). The `otel.protocol` field must be **`grpc`** (or omitted); HTTP/protobuf exporters are not implemented yet. The agent ships **`internal/otelexport`**: anomaly spans, security-relevant spans, and OTLP metric/log providers. See **`examples/otel-collector/otel-collector-config.yaml`**.
 
-**What exists today:** detection and anomalies go to **journald** (`log.Printf`); operational health is on **`/metrics`** (Prometheus format).
+The default **`otel.insecure: true`** is for local collectors. For remote endpoints, set **`insecure: false`** and configure TLS/credentials appropriate to your environment.
 
-**Planned:** OTLP export for anomaly spans, structured security event logs, and pushed metrics (see design notes if you maintain a private `ARCHITECTURE.md`). Until that lands, treat any OTel mention in discussions as a **roadmap** item, not a feature you can enable in this repo.
+When OTel is disabled, detection output remains on **journald** / process logs; **`/metrics`** stays health-only.
 
 ## Architecture
 
 Additional Mermaid diagrams (system context, pipeline, phases, telemetry): see **[diagram.md](diagram.md)** in the repo root.
 
-Data flows from kernel tracepoints through a ringbuf into userspace enrichment, MITRE tagging, time-window aggregation, and seasonal baselining. In the monitoring phase, anomalies are **logged** (journald); `/metrics` exposes **agent health only** (not z-scores or per-metric counters).
+Data flows from kernel tracepoints through a ringbuf into userspace enrichment, MITRE tagging, time-window aggregation, and seasonal baselining. In the monitoring phase, anomalies are **logged** and optionally exported via **OTLP**; `/metrics` exposes **agent health only** (not z-scores as Prometheus series).
 
 ```mermaid
 flowchart LR
@@ -241,7 +243,7 @@ sudo bpftool map list
 
 ### Prometheus
 
-The agent does **not** export per-event counters or anomaly gauges to Prometheus anymore — only **health** metrics (phase, progress, events processed, ringbuf drops, tracepoints attached). Use `examples/prometheus/scrape.yml` and `examples/prometheus/alerts.yml` for availability and pipeline-health alerting. For detection, rely on **journald** until OpenTelemetry export is implemented.
+The agent does **not** export per-event counters or anomaly gauges to Prometheus — only **health** metrics (phase, progress, events processed, ringbuf drops, enrichment failures, OTel export errors, tracepoints attached). Use `examples/prometheus/scrape.yml` and `examples/prometheus/alerts.yml` for availability alerting. For detection output, use **OpenTelemetry** (`otel.enabled`) and/or **journald** logs.
 
 ## What This Doesn't Detect
 

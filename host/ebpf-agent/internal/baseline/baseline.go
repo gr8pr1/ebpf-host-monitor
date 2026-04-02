@@ -2,6 +2,7 @@ package baseline
 
 import (
 	"math"
+	"sort"
 	"sync"
 
 	"ebpf-agent/internal/aggregator"
@@ -19,6 +20,9 @@ type BucketStats struct {
 	Max      float64
 	EWMA     float64
 	ewmaInit bool
+	// Last up to 8 observations for robust median/MAD (rolling).
+	ObsRing  [8]float64
+	ObsCount int
 }
 
 func (b *BucketStats) Mean() float64 {
@@ -38,6 +42,48 @@ func (b *BucketStats) StdDev() float64 {
 		variance = 0
 	}
 	return math.Sqrt(variance)
+}
+
+func pushObsRing(ring *[8]float64, count *int, v float64) {
+	if *count < 8 {
+		ring[*count] = v
+		(*count)++
+		return
+	}
+	copy(ring[:], ring[1:])
+	ring[7] = v
+}
+
+func (b *BucketStats) medianObs() float64 {
+	n := b.ObsCount
+	if n == 0 {
+		return 0
+	}
+	var tmp [8]float64
+	copy(tmp[:], b.ObsRing[:n])
+	sort.Float64s(tmp[:n])
+	if n%2 == 1 {
+		return tmp[n/2]
+	}
+	return (tmp[n/2-1] + tmp[n/2]) / 2
+}
+
+// MedianAbsDeviation returns MAD of the observation ring vs the median of that ring.
+func (b *BucketStats) madObs() float64 {
+	n := b.ObsCount
+	if n < 2 {
+		return 0
+	}
+	med := b.medianObs()
+	var dev [8]float64
+	for i := 0; i < n; i++ {
+		dev[i] = math.Abs(b.ObsRing[i] - med)
+	}
+	sort.Float64s(dev[:n])
+	if n%2 == 1 {
+		return dev[n/2]
+	}
+	return (dev[n/2-1] + dev[n/2]) / 2
 }
 
 // DimensionBaseline holds 168 hourly buckets for one metric dimension.
@@ -99,6 +145,8 @@ func (e *Engine) Ingest(w *aggregator.Window) {
 		} else {
 			b.EWMA = e.alpha*value + (1-e.alpha)*b.EWMA
 		}
+
+		pushObsRing(&b.ObsRing, &b.ObsCount, value)
 	}
 }
 
@@ -120,6 +168,28 @@ func (e *Engine) Lookup(key aggregator.DimensionKey, hour, dow int) (mean, stdde
 	}
 
 	return b.Mean(), b.StdDev(), b.EWMA, true
+}
+
+// LookupRobust returns mean/stddev/ewma plus median/MAD from the last up to 8 samples in the seasonal bucket.
+func (e *Engine) LookupRobust(key aggregator.DimensionKey, hour, dow int) (mean, stddev, ewma, median, mad float64, ready bool) {
+	idx := SeasonalIndex(hour, dow)
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	bl, ok := e.baselines[key]
+	if !ok {
+		return 0, 0, 0, 0, 0, false
+	}
+
+	b := &bl.Buckets[idx]
+	median = b.medianObs()
+	mad = b.madObs()
+	if b.Count < e.minSample {
+		return b.Mean(), b.StdDev(), b.EWMA, median, mad, false
+	}
+
+	return b.Mean(), b.StdDev(), b.EWMA, median, mad, true
 }
 
 // AllDimensions returns all tracked dimension keys.

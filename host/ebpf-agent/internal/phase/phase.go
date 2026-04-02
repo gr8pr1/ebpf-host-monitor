@@ -2,6 +2,7 @@ package phase
 
 import (
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"ebpf-agent/internal/scorer"
 	"ebpf-agent/internal/store"
 )
+
+const metaLearningStartedAt = "learning_started_at"
 
 const (
 	PhaseLearning  = 1
@@ -30,7 +33,7 @@ type Manager struct {
 	mu    sync.RWMutex
 	phase int
 
-	onScore func([]scorer.Result)
+	onScore func([]scorer.Result, *aggregator.Window)
 }
 
 func NewManager(
@@ -39,7 +42,7 @@ func NewManager(
 	st *store.Store,
 	learningDuration time.Duration,
 	recalibInterval time.Duration,
-	onScore func([]scorer.Result),
+	onScore func([]scorer.Result, *aggregator.Window),
 ) *Manager {
 	m := &Manager{
 		engine:           engine,
@@ -57,6 +60,10 @@ func NewManager(
 		snaps, err := st.LoadBaseline()
 		if err != nil {
 			log.Printf("WARN: failed to load persisted baseline: %v", err)
+			m.learningStart = time.Now()
+			if err2 := st.SetMeta(metaLearningStartedAt, strconv.FormatInt(m.learningStart.Unix(), 10)); err2 != nil {
+				log.Printf("WARN: failed to persist learning_started_at: %v", err2)
+			}
 		} else if len(snaps) > 0 {
 			engine.Restore(snaps)
 			phaseStr, _ := st.GetMeta("phase")
@@ -65,6 +72,21 @@ func NewManager(
 				log.Printf("Restored baseline with %d dimensions, entering monitoring phase", len(snaps))
 			} else {
 				log.Printf("Restored baseline with %d dimensions, continuing learning phase", len(snaps))
+				if ts, err := st.GetMeta(metaLearningStartedAt); err == nil && ts != "" {
+					if sec, err := strconv.ParseInt(ts, 10, 64); err == nil {
+						m.learningStart = time.Unix(sec, 0)
+					}
+				} else {
+					log.Printf("WARN: learning_started_at missing in state DB; learning timer reset to now (migration)")
+					m.learningStart = time.Now()
+					_ = st.SetMeta(metaLearningStartedAt, strconv.FormatInt(m.learningStart.Unix(), 10))
+				}
+			}
+		} else {
+			// First run: persist learning start so restarts do not reset the timer
+			m.learningStart = time.Now()
+			if err := st.SetMeta(metaLearningStartedAt, strconv.FormatInt(m.learningStart.Unix(), 10)); err != nil {
+				log.Printf("WARN: failed to persist learning_started_at: %v", err)
 			}
 		}
 	}
@@ -106,6 +128,8 @@ func (m *Manager) ProcessWindow(w *aggregator.Window) {
 			currentPhase = PhaseMonitoring
 			log.Printf("Learning phase complete, transitioning to monitoring")
 			m.persist("monitoring")
+			// Avoid second persist from recalibration on the same window (ISSUE-009)
+			m.lastRecalib = time.Now()
 		} else {
 			m.mu.Unlock()
 			return
@@ -123,7 +147,7 @@ func (m *Manager) ProcessWindow(w *aggregator.Window) {
 	if currentPhase == PhaseMonitoring {
 		results := m.scorer.Score(w)
 		if m.onScore != nil {
-			m.onScore(results)
+			m.onScore(results, w)
 		}
 	}
 }
@@ -134,7 +158,23 @@ func (m *Manager) Reset() {
 	defer m.mu.Unlock()
 	m.phase = PhaseLearning
 	m.learningStart = time.Now()
+	if m.store != nil {
+		if err := m.store.SetMeta(metaLearningStartedAt, strconv.FormatInt(m.learningStart.Unix(), 10)); err != nil {
+			log.Printf("WARN: failed to persist learning_started_at on reset: %v", err)
+		}
+	}
 	log.Printf("Baseline reset, entering learning phase")
+}
+
+// Persist saves the current baseline and phase to the state store (e.g. on shutdown).
+func (m *Manager) Persist() {
+	m.mu.RLock()
+	phaseName := "learning"
+	if m.phase == PhaseMonitoring {
+		phaseName = "monitoring"
+	}
+	m.mu.RUnlock()
+	m.persist(phaseName)
 }
 
 func (m *Manager) persist(phaseName string) {

@@ -22,6 +22,7 @@ vendor/
 *.log
 
 # IDE
+.cursor/
 .vscode/
 .idea/
 *.swp

@@ -78,7 +78,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define FLAG_PASSWD_READ       (1 << 3)
 
 /* ============================================================
- * Structured event for ringbuf (48 bytes)
+ * Structured event for ringbuf (64 bytes): IPv4 or IPv6 dest address
  * ============================================================ */
 struct event {
     __u64 timestamp_ns;
@@ -88,7 +88,9 @@ struct event {
     __u8  event_type;
     __u8  flags;
     __u16 dest_port;
-    __u32 dest_ip;
+    __u8  ip_version; /* 0=none, 4=IPv4 (first 4 bytes of dest_ip), 6=IPv6 */
+    __u8  _pad[3];
+    __u8  dest_ip[16];
     char  comm[16];
 };
 
@@ -159,6 +161,26 @@ struct {
     __type(key, __u32);
     __type(value, __u64);
 } sensitive_file_counter SEC(".maps");
+
+struct openat_rl {
+    __u64 window_ns;
+    __u32 count;
+    __u32 pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct openat_rl);
+} openat_rate_limit SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} file_open_counter SEC(".maps");
 #endif
 
 #ifdef MONITOR_SETUID
@@ -226,9 +248,11 @@ static __always_inline void inc_counter(void *map)
 
 /* ============================================================
  * Helper: emit a structured event to the ringbuf
+ * ip_version: 0 = clear dest_ip; 4 = ip4 is network-order s_addr; 6 = read 16 bytes from ip6_user
  * ============================================================ */
 static __always_inline void emit_event(__u8 event_type, __u8 flags,
-                                       __u16 dest_port, __u32 dest_ip)
+                                       __u16 dest_port, __u8 ip_version,
+                                       __u32 ip4, const void *ip6_user)
 {
     struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
@@ -243,7 +267,46 @@ static __always_inline void emit_event(__u8 event_type, __u8 flags,
     e->event_type = event_type;
     e->flags = flags;
     e->dest_port = dest_port;
-    e->dest_ip = dest_ip;
+    e->ip_version = ip_version;
+    e->_pad[0] = 0;
+    e->_pad[1] = 0;
+    e->_pad[2] = 0;
+
+    if (ip_version == 4) {
+        *(__u32 *)e->dest_ip = ip4;
+        e->dest_ip[4] = 0;
+        e->dest_ip[5] = 0;
+        e->dest_ip[6] = 0;
+        e->dest_ip[7] = 0;
+        e->dest_ip[8] = 0;
+        e->dest_ip[9] = 0;
+        e->dest_ip[10] = 0;
+        e->dest_ip[11] = 0;
+        e->dest_ip[12] = 0;
+        e->dest_ip[13] = 0;
+        e->dest_ip[14] = 0;
+        e->dest_ip[15] = 0;
+    } else if (ip_version == 6 && ip6_user) {
+        bpf_probe_read_user(e->dest_ip, 16, ip6_user);
+    } else {
+        e->dest_ip[0] = 0;
+        e->dest_ip[1] = 0;
+        e->dest_ip[2] = 0;
+        e->dest_ip[3] = 0;
+        e->dest_ip[4] = 0;
+        e->dest_ip[5] = 0;
+        e->dest_ip[6] = 0;
+        e->dest_ip[7] = 0;
+        e->dest_ip[8] = 0;
+        e->dest_ip[9] = 0;
+        e->dest_ip[10] = 0;
+        e->dest_ip[11] = 0;
+        e->dest_ip[12] = 0;
+        e->dest_ip[13] = 0;
+        e->dest_ip[14] = 0;
+        e->dest_ip[15] = 0;
+    }
+
     bpf_get_current_comm(e->comm, sizeof(e->comm));
 
     bpf_ringbuf_submit(e, 0);
@@ -312,7 +375,7 @@ int trace_exec(struct trace_event_raw_sys_enter *ctx)
 
     long ret = bpf_probe_read_user_str(filename, sizeof(filename) - 1, (void *)ctx->args[0]);
     if (ret <= 0) {
-        emit_event(EVENT_EXEC, 0, 0, 0);
+        emit_event(EVENT_EXEC, 0, 0, 0, 0, NULL);
         return 0;
     }
 
@@ -363,7 +426,7 @@ int trace_exec(struct trace_event_raw_sys_enter *ctx)
 #endif /* MONITOR_PASSWD */
 
 done:
-    emit_event(EVENT_EXEC, flags, 0, 0);
+    emit_event(EVENT_EXEC, flags, 0, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_EXEC */
@@ -376,32 +439,47 @@ SEC("tracepoint/syscalls/sys_enter_connect")
 int trace_connect(struct trace_event_raw_sys_enter *ctx)
 {
     struct sockaddr_in addr = {0};
+    struct sockaddr_in6 addr6 = {0};
     __u8 flags = 0;
     __u16 port = 0;
     __u32 ip = 0;
+    __u16 family = 0;
 
     inc_counter(&connect_counter);
 
     int addrlen = (int)ctx->args[2];
-    if (addrlen < (int)sizeof(struct sockaddr_in))
+    void *uaddr = (void *)ctx->args[1];
+
+    if (bpf_probe_read_user(&family, sizeof(family), uaddr) != 0)
         goto done;
 
-    if (bpf_probe_read_user(&addr, sizeof(addr), (void *)ctx->args[1]) != 0)
-        goto done;
+    if (family == 2 && addrlen >= (int)sizeof(struct sockaddr_in)) {
+        if (bpf_probe_read_user(&addr, sizeof(addr), uaddr) != 0)
+            goto done;
+        port = __builtin_bswap16(addr.sin_port);
+        ip = addr.sin_addr.s_addr;
+        if (is_suspicious_port(port)) {
+            inc_counter(&suspicious_connect_counter);
+            flags |= FLAG_SUSPICIOUS_PORT;
+        }
+        emit_event(EVENT_CONNECT, flags, port, 4, ip, NULL);
+        return 0;
+    }
 
-    if (addr.sin_family != 2) /* AF_INET */
-        goto done;
-
-    port = __builtin_bswap16(addr.sin_port);
-    ip = addr.sin_addr.s_addr;
-
-    if (is_suspicious_port(port)) {
-        inc_counter(&suspicious_connect_counter);
-        flags |= FLAG_SUSPICIOUS_PORT;
+    if (family == 10 && addrlen >= (int)sizeof(struct sockaddr_in6)) {
+        if (bpf_probe_read_user(&addr6, sizeof(addr6), uaddr) != 0)
+            goto done;
+        port = __builtin_bswap16(addr6.sin6_port);
+        if (is_suspicious_port(port)) {
+            inc_counter(&suspicious_connect_counter);
+            flags |= FLAG_SUSPICIOUS_PORT;
+        }
+        emit_event(EVENT_CONNECT, flags, port, 6, 0, &addr6.sin6_addr);
+        return 0;
     }
 
 done:
-    emit_event(EVENT_CONNECT, flags, port, ip);
+    emit_event(EVENT_CONNECT, flags, port, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_CONNECT */
@@ -414,7 +492,7 @@ SEC("tracepoint/syscalls/sys_enter_ptrace")
 int trace_ptrace(struct trace_event_raw_sys_enter *ctx)
 {
     inc_counter(&ptrace_counter);
-    emit_event(EVENT_PTRACE, 0, 0, 0);
+    emit_event(EVENT_PTRACE, 0, 0, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_PTRACE */
@@ -423,6 +501,27 @@ int trace_ptrace(struct trace_event_raw_sys_enter *ctx)
  * TRACEPOINT: sys_enter_openat
  * ============================================================ */
 #ifdef MONITOR_OPENAT
+static __always_inline void try_emit_file_open_sampled(void)
+{
+    __u32 key = 0;
+    __u64 now = bpf_ktime_get_ns();
+    const __u64 win_ns = 1000000000ULL;
+    const __u32 max_per_sec = 100;
+
+    struct openat_rl *v = bpf_map_lookup_elem(&openat_rate_limit, &key);
+    if (!v)
+        return;
+    if (v->window_ns == 0 || now - v->window_ns > win_ns) {
+        v->window_ns = now;
+        v->count = 0;
+    }
+    if (v->count >= max_per_sec)
+        return;
+    v->count++;
+    inc_counter(&file_open_counter);
+    emit_event(EVENT_OPENAT, 0, 0, 0, 0, NULL);
+}
+
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_openat(struct trace_event_raw_sys_enter *ctx)
 {
@@ -442,10 +541,15 @@ int trace_openat(struct trace_event_raw_sys_enter *ctx)
     } else if (ret >= 17 && ends_with(path, ret, "/authorized_keys", 16)) {
         inc_counter(&sensitive_file_counter);
         flags |= FLAG_SENSITIVE_FILE;
+    } else if (ret >= 12 && str_eq(path, "/etc/passwd", 11)) {
+        inc_counter(&sensitive_file_counter);
+        flags |= FLAG_PASSWD_READ;
     }
 
     if (flags)
-        emit_event(EVENT_OPENAT, flags, 0, 0);
+        emit_event(EVENT_OPENAT, flags, 0, 0, 0, NULL);
+    else
+        try_emit_file_open_sampled();
 
     return 0;
 }
@@ -459,7 +563,7 @@ SEC("tracepoint/syscalls/sys_enter_setuid")
 int trace_setuid(struct trace_event_raw_sys_enter *ctx)
 {
     inc_counter(&setuid_counter);
-    emit_event(EVENT_SETUID, 0, 0, 0);
+    emit_event(EVENT_SETUID, 0, 0, 0, 0, NULL);
     return 0;
 }
 
@@ -467,7 +571,7 @@ SEC("tracepoint/syscalls/sys_enter_setgid")
 int trace_setgid(struct trace_event_raw_sys_enter *ctx)
 {
     inc_counter(&setgid_counter);
-    emit_event(EVENT_SETGID, 0, 0, 0);
+    emit_event(EVENT_SETGID, 0, 0, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_SETUID */
@@ -480,7 +584,7 @@ SEC("tracepoint/sched/sched_process_fork")
 int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
 {
     inc_counter(&fork_counter);
-    emit_event(EVENT_FORK, 0, 0, 0);
+    emit_event(EVENT_FORK, 0, 0, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_FORK */
@@ -492,7 +596,7 @@ int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
 SEC("tracepoint/sched/sched_process_exit")
 int trace_exit(struct trace_event_raw_sched_process_template *ctx)
 {
-    emit_event(EVENT_EXIT, 0, 0, 0);
+    emit_event(EVENT_EXIT, 0, 0, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_EXIT */
@@ -505,24 +609,34 @@ SEC("tracepoint/syscalls/sys_enter_bind")
 int trace_bind(struct trace_event_raw_sys_enter *ctx)
 {
     struct sockaddr_in addr = {0};
+    struct sockaddr_in6 addr6 = {0};
     __u16 port = 0;
+    __u16 family = 0;
+    void *uaddr = (void *)ctx->args[1];
 
     inc_counter(&bind_counter);
 
     int addrlen = (int)ctx->args[2];
-    if (addrlen < (int)sizeof(struct sockaddr_in))
+    if (bpf_probe_read_user(&family, sizeof(family), uaddr) != 0)
         goto done;
 
-    if (bpf_probe_read_user(&addr, sizeof(addr), (void *)ctx->args[1]) != 0)
-        goto done;
-
-    if (addr.sin_family != 2)
-        goto done;
-
-    port = __builtin_bswap16(addr.sin_port);
+    if (family == 2 && addrlen >= (int)sizeof(struct sockaddr_in)) {
+        if (bpf_probe_read_user(&addr, sizeof(addr), uaddr) != 0)
+            goto done;
+        port = __builtin_bswap16(addr.sin_port);
+        emit_event(EVENT_BIND, 0, port, 4, addr.sin_addr.s_addr, NULL);
+        return 0;
+    }
+    if (family == 10 && addrlen >= (int)sizeof(struct sockaddr_in6)) {
+        if (bpf_probe_read_user(&addr6, sizeof(addr6), uaddr) != 0)
+            goto done;
+        port = __builtin_bswap16(addr6.sin6_port);
+        emit_event(EVENT_BIND, 0, port, 6, 0, &addr6.sin6_addr);
+        return 0;
+    }
 
 done:
-    emit_event(EVENT_BIND, 0, port, 0);
+    emit_event(EVENT_BIND, 0, port, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_BIND */
@@ -535,25 +649,36 @@ SEC("tracepoint/syscalls/sys_enter_sendto")
 int trace_sendto(struct trace_event_raw_sys_enter *ctx)
 {
     struct sockaddr_in addr = {0};
+    struct sockaddr_in6 addr6 = {0};
+    __u16 family = 0;
 
     void *addr_ptr = (void *)ctx->args[4];
     if (!addr_ptr)
         return 0;
 
     int addrlen = (int)ctx->args[5];
-    if (addrlen < (int)sizeof(struct sockaddr_in))
+    if (bpf_probe_read_user(&family, sizeof(family), addr_ptr) != 0)
         return 0;
 
-    if (bpf_probe_read_user(&addr, sizeof(addr), addr_ptr) != 0)
+    if (family == 2 && addrlen >= (int)sizeof(struct sockaddr_in)) {
+        if (bpf_probe_read_user(&addr, sizeof(addr), addr_ptr) != 0)
+            return 0;
+        __u16 port = __builtin_bswap16(addr.sin_port);
+        if (port == 53) {
+            inc_counter(&dns_counter);
+            emit_event(EVENT_DNS, 0, 53, 4, addr.sin_addr.s_addr, NULL);
+        }
         return 0;
+    }
 
-    if (addr.sin_family != 2)
-        return 0;
-
-    __u16 port = __builtin_bswap16(addr.sin_port);
-    if (port == 53) {
-        inc_counter(&dns_counter);
-        emit_event(EVENT_DNS, 0, 53, addr.sin_addr.s_addr);
+    if (family == 10 && addrlen >= (int)sizeof(struct sockaddr_in6)) {
+        if (bpf_probe_read_user(&addr6, sizeof(addr6), addr_ptr) != 0)
+            return 0;
+        __u16 port = __builtin_bswap16(addr6.sin6_port);
+        if (port == 53) {
+            inc_counter(&dns_counter);
+            emit_event(EVENT_DNS, 0, 53, 6, 0, &addr6.sin6_addr);
+        }
     }
 
     return 0;
@@ -568,7 +693,7 @@ SEC("tracepoint/syscalls/sys_enter_capset")
 int trace_capset(struct trace_event_raw_sys_enter *ctx)
 {
     inc_counter(&capset_counter);
-    emit_event(EVENT_CAPSET, 0, 0, 0);
+    emit_event(EVENT_CAPSET, 0, 0, 0, 0, NULL);
     return 0;
 }
 #endif /* MONITOR_CAPSET */

@@ -25,6 +25,7 @@ import (
 	"ebpf-agent/internal/config"
 	"ebpf-agent/internal/enricher"
 	"ebpf-agent/internal/mitre"
+	"ebpf-agent/internal/otelexport"
 	"ebpf-agent/internal/phase"
 	"ebpf-agent/internal/ringbuf"
 	"ebpf-agent/internal/scorer"
@@ -38,6 +39,8 @@ var bpfProgram []byte
 
 var eventsProcessed atomic.Int64
 var ringbufDrops atomic.Int64
+var enrichmentFailures atomic.Int64
+var otelExportErrors atomic.Int64
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -114,6 +117,18 @@ func main() {
 		ConstLabels: prometheus.Labels{"host": hostID},
 	}, func() float64 { return float64(ringbufDrops.Load()) })
 
+	enrichmentFailuresCounter := prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name:        "ebpf_enrichment_failures_total",
+		Help:        "Events where PID/binary resolution failed",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	}, func() float64 { return float64(enrichmentFailures.Load()) })
+
+	otelExportErrorsCounter := prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name:        "ebpf_otel_export_errors_total",
+		Help:        "OTel export shutdown or flush errors",
+		ConstLabels: prometheus.Labels{"host": hostID},
+	}, func() float64 { return float64(otelExportErrors.Load()) })
+
 	tracepointsAttached := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "ebpf_tracepoints_attached",
 		Help:        "Number of active tracepoint attachments",
@@ -123,7 +138,7 @@ func main() {
 
 	prometheus.MustRegister(
 		agentInfo, baselinePhaseGauge, baselineProgressGauge,
-		eventsProcessedCounter, ringbufDropsCounter, tracepointsAttached,
+		eventsProcessedCounter, ringbufDropsCounter, enrichmentFailuresCounter, otelExportErrorsCounter, tracepointsAttached,
 	)
 
 	// --- Baseline pipeline ---
@@ -139,10 +154,16 @@ func main() {
 		defer st.Close()
 	}
 
-	sc := scorer.New(blEngine, cfg.Scoring.ZScoreThreshold, cfg.Baseline.MinStdDev, cfg.Scoring.ColdStartSeverity)
+	sc := scorer.New(blEngine, cfg.Scoring.ZScoreThreshold, cfg.Baseline.MinStdDev, cfg.Scoring.ColdStartSeverity,
+		cfg.Scoring.Ceilings, cfg.Scoring.MADEnabled)
+
+	otelClient, err := otelexport.Init(context.Background(), cfg.OTel, hostID, cfg.Host.Labels)
+	if err != nil {
+		log.Fatalf("otel init: %v", err)
+	}
 
 	var scoreMu sync.Mutex
-	onScore := func(results []scorer.Result) {
+	onScore := func(results []scorer.Result, win *aggregator.Window) {
 		scoreMu.Lock()
 		defer scoreMu.Unlock()
 		for _, r := range results {
@@ -159,8 +180,15 @@ func main() {
 					log.Printf("COLD-START [%s] %s/%s new dimension observed (count=%.0f)",
 						severity, r.Key.MetricName, dim, r.Observed)
 				} else {
-					log.Printf("ANOMALY [%s] %s/%s z=%.2f (mean=%.2f stddev=%.2f observed=%.0f)",
-						severity, r.Key.MetricName, dim, r.ZScore, r.Mean, r.StdDev, r.Observed)
+					extra := ""
+					if r.UsedMAD {
+						extra = " (MAD)"
+					}
+					log.Printf("ANOMALY [%s] %s/%s z=%.2f (mean=%.2f stddev=%.2f observed=%.0f)%s",
+						severity, r.Key.MetricName, dim, r.ZScore, r.Mean, r.StdDev, r.Observed, extra)
+				}
+				if otelClient != nil && win != nil {
+					otelClient.EmitAnomaly(context.Background(), r, win)
 				}
 			}
 		}
@@ -179,42 +207,59 @@ func main() {
 		cfg.Dimensions.PerUser,
 		cfg.Dimensions.PerProcess,
 		cfg.Dimensions.PerContainer,
+		cfg.Dimensions.Network,
+		cfg.Dimensions.FileSystem,
+		cfg.Dimensions.Scheduling,
 	)
 
-	// --- Ringbuf consumer ---
-	var rbConsumer *ringbuf.Consumer
+	// --- Ringbuf consumer (required for baseline pipeline) ---
 	eventsMap, hasRingbuf := coll.Maps["events"]
-	if hasRingbuf {
-		rbConsumer, err = ringbuf.NewConsumer(eventsMap, 4096)
-		if err != nil {
-			log.Printf("WARN: failed to create ringbuf consumer: %v (baseline features disabled)", err)
-			hasRingbuf = false
-		}
+	if !hasRingbuf {
+		log.Fatal("BPF collection missing ringbuf map \"events\"")
 	}
+	rbConsumer, err := ringbuf.NewConsumer(eventsMap, 4096)
+	if err != nil {
+		log.Fatalf("FATAL: failed to create ringbuf consumer: %v", err)
+	}
+	rbConsumer.SetDropCallback(func() { ringbufDrops.Add(1) })
 
-	if hasRingbuf && rbConsumer != nil {
-		rbConsumer.SetDropCallback(func() { ringbufDrops.Add(1) })
-		go rbConsumer.Run()
-		defer rbConsumer.Close()
+	var consumerWg sync.WaitGroup
+	consumerWg.Add(1)
+	go func() {
+		defer consumerWg.Done()
+		rbConsumer.Run()
+	}()
+	consumerWg.Add(1)
+	go func() {
+		defer consumerWg.Done()
+		for ev := range rbConsumer.Events() {
+			eventsProcessed.Add(1)
+			enriched := enrich.Enrich(ev)
 
-		go func() {
-			for ev := range rbConsumer.Events() {
-				eventsProcessed.Add(1)
-				enriched := enrich.Enrich(ev)
-
-				mapping := mitre.Map(enriched)
-				for _, t := range mapping.Techniques {
-					enriched.MitreTags = append(enriched.MitreTags, t.ID)
-				}
+			mapping := mitre.Map(enriched)
+			for _, t := range mapping.Techniques {
+				enriched.MitreTags = append(enriched.MitreTags, t.ID)
+			}
 				if !enriched.Resolved {
+					enrichmentFailures.Add(1)
 					log.Printf("ENRICH-FAIL pid=%d comm=%s (process exited before resolution)",
 						ev.PID, ev.CommString())
 				}
 
+				if otelClient != nil {
+					switch enriched.Raw.EventType {
+					case ringbuf.EventPtrace, ringbuf.EventCapset:
+						otelClient.EmitSecurityEvent(context.Background(), enriched)
+					default:
+						if enriched.Raw.Flags&(ringbuf.FlagSuspiciousPort|ringbuf.FlagSensitiveFile|ringbuf.FlagPasswdRead) != 0 {
+							otelClient.EmitSecurityEvent(context.Background(), enriched)
+						}
+					}
+				}
+
 				agg.Add(enriched)
-			}
-		}()
-	}
+		}
+	}()
 
 	// --- HTTP server (health endpoint only) ---
 	mux := http.NewServeMux()
@@ -262,9 +307,24 @@ func main() {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutting down...")
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			srv.Shutdown(shutdownCtx)
+			windowTicker.Stop()
+			healthTicker.Stop()
+			_ = rbConsumer.Close()
+			consumerWg.Wait()
+			w := agg.Rotate()
+			phaseMgr.ProcessWindow(w)
+			phaseMgr.Persist()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if otelClient != nil {
+				if err := otelClient.Shutdown(shutdownCtx); err != nil {
+					log.Printf("OTel shutdown: %v", err)
+					otelExportErrors.Add(1)
+				}
+			}
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("HTTP server shutdown: %v", err)
+			}
+			cancel()
 			return
 
 		case <-healthTicker.C:
@@ -272,10 +332,8 @@ func main() {
 			baselineProgressGauge.Set(phaseMgr.Progress())
 
 		case <-windowTicker.C:
-			if hasRingbuf {
-				w := agg.Rotate()
-				phaseMgr.ProcessWindow(w)
-			}
+			w := agg.Rotate()
+			phaseMgr.ProcessWindow(w)
 		}
 	}
 }

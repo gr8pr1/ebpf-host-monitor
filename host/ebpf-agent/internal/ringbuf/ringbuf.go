@@ -3,13 +3,15 @@ package ringbuf
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 
 	"github.com/cilium/ebpf"
 	cringbuf "github.com/cilium/ebpf/ringbuf"
 )
 
-const EventSize = 48
+const EventSize = 64
 
 const (
 	EventExec    uint8 = 1
@@ -23,6 +25,12 @@ const (
 	EventBind    uint8 = 9
 	EventDNS     uint8 = 10
 	EventCapset  uint8 = 11
+)
+
+const (
+	IPVersionNone uint8 = 0
+	IPVersion4    uint8 = 4
+	IPVersion6    uint8 = 6
 )
 
 const (
@@ -40,8 +48,15 @@ type Event struct {
 	EventType   uint8
 	Flags       uint8
 	DestPort    uint16
-	DestIP      uint32
+	IPVersion   uint8
+	_           [3]byte
+	DestIP      [16]byte
 	Comm        [16]byte
+}
+
+// DestIPv4U32 returns the first four bytes of DestIP as a uint32 (matches prior BPF sin_addr layout).
+func (e *Event) DestIPv4U32() uint32 {
+	return binary.LittleEndian.Uint32(e.DestIP[:4])
 }
 
 func (e *Event) CommString() string {
@@ -51,6 +66,19 @@ func (e *Event) CommString() string {
 		}
 	}
 	return string(e.Comm[:])
+}
+
+// FormatDestIP returns a display string for the destination address (IPv4 or IPv6).
+func (e *Event) FormatDestIP() string {
+	switch e.IPVersion {
+	case IPVersion4:
+		ip := e.DestIP[:4]
+		return fmt.Sprintf("%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3])
+	case IPVersion6:
+		return net.IP(e.DestIP[:]).String()
+	default:
+		return ""
+	}
 }
 
 func parseEvent(data []byte) (*Event, error) {
@@ -65,9 +93,10 @@ func parseEvent(data []byte) (*Event, error) {
 		EventType:   data[24],
 		Flags:       data[25],
 		DestPort:    binary.LittleEndian.Uint16(data[26:28]),
-		DestIP:      binary.LittleEndian.Uint32(data[28:32]),
+		IPVersion:   data[28],
 	}
-	copy(e.Comm[:], data[32:48])
+	copy(e.DestIP[:], data[32:48])
+	copy(e.Comm[:], data[48:64])
 	return e, nil
 }
 

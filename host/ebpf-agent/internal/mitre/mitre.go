@@ -1,6 +1,7 @@
 package mitre
 
 import (
+	"net"
 	"path/filepath"
 	"strings"
 
@@ -67,6 +68,10 @@ func Map(ev *enricher.EnrichedEvent) Mapping {
 		return Mapping{Techniques: []Technique{
 			{ID: "T1106", Name: "Native API", Tactic: "Execution"},
 		}}
+	case ringbuf.EventExit:
+		return Mapping{Techniques: []Technique{
+			{ID: "T1106", Name: "Native API", Tactic: "Execution"},
+		}}
 	default:
 		return Mapping{}
 	}
@@ -102,15 +107,19 @@ func mapExec(ev *enricher.EnrichedEvent) Mapping {
 		})
 	}
 
-	if base != "" && comm != "" && base != comm && !strings.HasPrefix(base, comm) {
-		techniques = append(techniques, Technique{
-			ID: "T1036.003", Name: "Rename System Utilities", Tactic: "Defense Evasion",
-		})
+	if base != "" && comm != "" && base != comm {
+		prefixOK := strings.HasPrefix(base, comm) &&
+			(len(base) == len(comm) || base[len(comm)] == '.')
+		if !prefixOK {
+			techniques = append(techniques, Technique{
+				ID: "T1036.003", Name: "Rename System Utilities", Tactic: "Defense Evasion",
+			})
+		}
 	}
 
 	if len(techniques) == 0 {
 		techniques = append(techniques, Technique{
-			ID: "T1059", Name: "Command and Scripting Interpreter", Tactic: "Execution",
+			ID: "T1106", Name: "Native API", Tactic: "Execution",
 		})
 	}
 
@@ -138,11 +147,19 @@ func mapConnect(ev *enricher.EnrichedEvent) Mapping {
 		})
 	}
 
-	ip := ev.Raw.DestIP
-	if isRFC1918(ip) {
-		techniques = append(techniques, Technique{
-			ID: "T1021", Name: "Remote Services", Tactic: "Lateral Movement",
-		})
+	switch ev.Raw.IPVersion {
+	case ringbuf.IPVersion4:
+		if isRFC1918(ev.Raw.DestIPv4U32()) {
+			techniques = append(techniques, Technique{
+				ID: "T1021", Name: "Remote Services", Tactic: "Lateral Movement",
+			})
+		}
+	case ringbuf.IPVersion6:
+		if isIPv6PrivateOrULA(net.IP(ev.Raw.DestIP[:])) {
+			techniques = append(techniques, Technique{
+				ID: "T1021", Name: "Remote Services", Tactic: "Lateral Movement",
+			})
+		}
 	}
 
 	if len(techniques) == 0 {
@@ -155,12 +172,12 @@ func mapConnect(ev *enricher.EnrichedEvent) Mapping {
 }
 
 func mapOpenat(ev *enricher.EnrichedEvent) Mapping {
-	if ev.Raw.Flags&ringbuf.FlagSensitiveFile != 0 {
+	if ev.Raw.Flags&ringbuf.FlagPasswdRead != 0 {
 		return Mapping{Techniques: []Technique{
 			{ID: "T1003.008", Name: "/etc/passwd and /etc/shadow", Tactic: "Credential Access"},
 		}}
 	}
-	if ev.Raw.Flags&ringbuf.FlagPasswdRead != 0 {
+	if ev.Raw.Flags&ringbuf.FlagSensitiveFile != 0 {
 		return Mapping{Techniques: []Technique{
 			{ID: "T1003.008", Name: "/etc/passwd and /etc/shadow", Tactic: "Credential Access"},
 		}}
@@ -198,6 +215,20 @@ func isRFC1918(ip uint32) bool {
 		return true
 	}
 	if b0 == 192 && b1 == 168 {
+		return true
+	}
+	return false
+}
+
+// isIPv6PrivateOrULA matches ULA (fc00::/7) and link-local (fe80::/10).
+func isIPv6PrivateOrULA(ip net.IP) bool {
+	if len(ip) != 16 {
+		return false
+	}
+	if ip[0] == 0xfe && (ip[1]&0xc0) == 0x80 {
+		return true
+	}
+	if (ip[0] & 0xfe) == 0xfc {
 		return true
 	}
 	return false

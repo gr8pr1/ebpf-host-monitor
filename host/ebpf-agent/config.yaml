@@ -10,9 +10,6 @@ server:
     username: ""
     password: ""
 
-poll_interval: 1s
-bpf_object: bpf/exec.bpf.o
-
 # Host identification (auto-detected from /etc/machine-id if empty)
 host:
   id: ""
@@ -28,13 +25,15 @@ baseline:
   ewma_alpha: 0.01
   min_stddev: 1.0                    # floor to prevent +Inf z-scores on constant dimensions
   state_file: /var/lib/ebpf-agent/baseline.db
+  new_dimension_learn_window: 24h    # reserved for fast-track learning of new dimensions
 
 # Anomaly scoring thresholds
 scoring:
   zscore_threshold: 3.0
-  quantile_threshold: 0.99
   minimum_samples: 60
   cold_start_severity: warning       # severity for dimensions seen for the first time post-learning
+  mad_enabled: false                 # use robust median/MAD scoring when true
+  ceilings: {}                       # optional per-metric hard caps, e.g. ptrace: 10
 
 # Container monitoring (requires cgroup v2)
 container_monitoring:
@@ -95,61 +94,36 @@ tracepoints:
     name: sys_enter_capset
     program: trace_capset
 
-# Metrics to expose — each maps a BPF per-CPU map to a Prometheus counter
-metrics:
-  # Execution monitoring
-  - name: ebpf_exec_events_total
-    help: "Total execve events"
-    bpf_map: exec_counter
-  - name: ebpf_sudo_events_total
-    help: "Total sudo privilege escalation events"
-    bpf_map: sudo_counter
-  - name: ebpf_passwd_read_events_total
-    help: "Total /etc/passwd read attempts"
-    bpf_map: passwd_read_counter
-
-  # Network monitoring
-  - name: ebpf_connect_events_total
-    help: "Total outbound connect() syscalls"
-    bpf_map: connect_counter
-  - name: ebpf_suspicious_connect_events_total
-    help: "Total connections to suspicious C2 ports"
-    bpf_map: suspicious_connect_counter
-
-  # Process injection
-  - name: ebpf_ptrace_events_total
-    help: "Total ptrace() syscalls"
-    bpf_map: ptrace_counter
-
-  # Sensitive file access
-  - name: ebpf_sensitive_file_access_total
-    help: "Total openat() on sensitive files"
-    bpf_map: sensitive_file_counter
-
-  # Privilege escalation
-  - name: ebpf_setuid_events_total
-    help: "Total setuid() syscalls"
-    bpf_map: setuid_counter
-  - name: ebpf_setgid_events_total
-    help: "Total setgid() syscalls"
-    bpf_map: setgid_counter
-
-  # Process lifecycle
-  - name: ebpf_fork_events_total
-    help: "Total fork events"
-    bpf_map: fork_counter
-
-  # Network: bind
-  - name: ebpf_bind_events_total
-    help: "Total bind() syscalls"
-    bpf_map: bind_counter
-
-  # DNS
-  - name: ebpf_dns_events_total
-    help: "Total DNS queries (sendto port 53)"
-    bpf_map: dns_counter
-
-  # Capabilities
-  - name: ebpf_capset_events_total
-    help: "Total capset() syscalls"
-    bpf_map: capset_counter
+# OpenTelemetry — primary telemetry path (traces + metrics + log provider)
+otel:
+  enabled: false
+  endpoint: "127.0.0.1:4317"
+  # OTLP gRPC only (http/protobuf not implemented in agent)
+  protocol: grpc
+  insecure: true
+  # Reserved: OTLP gRPC metadata not wired yet (exporter uses dial options only)
+  headers: {}
+  export_metrics: true
+  export_traces: true
+  export_logs: true
+  metric_export_interval: 60s
+  sampling:
+    ptrace: 1.0
+    suspicious_connect: 1.0
+    capset: 1.0
+    sensitive_file: 1.0
+    setuid: 1.0
+    sudo: 1.0
+    bind: 0.1
+    connect: 0.01
+    dns: 0.01
+    exec: 0.01
+    fork: 0.0
+    exit: 0.0
+  # Reserved: batch sizing is SDK default; these fields are not applied in otelexport yet
+  batch:
+    max_queue_size: 8192
+    max_export_batch: 512
+    export_timeout: 30s
+  resource_attributes:
+    service.name: "ebpf-agent"

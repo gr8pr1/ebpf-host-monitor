@@ -1,0 +1,223 @@
+// Package otelexport provides OpenTelemetry export for anomaly traces, security logs, and metrics.
+package otelexport
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/log/global"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"ebpf-agent/internal/aggregator"
+	"ebpf-agent/internal/config"
+	"ebpf-agent/internal/enricher"
+	"ebpf-agent/internal/scorer"
+)
+
+// Client holds OTel providers and emit helpers.
+type Client struct {
+	tracer        trace.Tracer
+	shutdownFuncs []func(context.Context) error
+	cfg           config.OTelConfig
+	sampling      map[string]float64
+}
+
+// Init builds tracer, meter, and log providers from config.
+func Init(ctx context.Context, cfg config.OTelConfig, hostID string, hostLabels map[string]string) (*Client, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	if cfg.Endpoint == "" {
+		return nil, fmt.Errorf("otel: endpoint is required when enabled")
+	}
+	proto := strings.ToLower(strings.TrimSpace(cfg.Protocol))
+	if proto == "" {
+		proto = "grpc"
+	}
+	if proto != "grpc" {
+		return nil, fmt.Errorf("otel: protocol %q is not supported (only grpc OTLP is implemented)", cfg.Protocol)
+	}
+
+	attrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String("ebpf-agent"),
+		semconv.ServiceVersionKey.String("3.0.0"),
+		attribute.String("host.id", hostID),
+		attribute.String("host.name", hostID),
+	}
+	if hostLabels != nil {
+		if v := hostLabels["environment"]; v != "" {
+			attrs = append(attrs, attribute.String("deployment.environment", v))
+		}
+		if v := hostLabels["role"]; v != "" {
+			attrs = append(attrs, attribute.String("host.role", v))
+		}
+	}
+	for k, v := range cfg.ResourceAttributes {
+		if v != "" {
+			attrs = append(attrs, attribute.String(k, v))
+		}
+	}
+
+	res, err := resource.New(ctx, resource.WithAttributes(attrs...))
+	if err != nil {
+		return nil, err
+	}
+
+	dialOpts := []grpc.DialOption{}
+	if cfg.Insecure {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	c := &Client{cfg: cfg, sampling: cfg.Sampling}
+	if c.sampling == nil {
+		c.sampling = map[string]float64{}
+	}
+
+	if cfg.ExportTraces {
+		texp, err := otlptracegrpc.New(ctx,
+			otlptracegrpc.WithEndpoint(cfg.Endpoint),
+			otlptracegrpc.WithDialOption(dialOpts...),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("otel trace exporter: %w", err)
+		}
+		tp := sdktrace.NewTracerProvider(
+			sdktrace.WithBatcher(texp),
+			sdktrace.WithResource(res),
+		)
+		otel.SetTracerProvider(tp)
+		c.tracer = tp.Tracer("ebpf-agent")
+		c.shutdownFuncs = append(c.shutdownFuncs, tp.Shutdown)
+	}
+
+	if cfg.ExportMetrics {
+		mexp, err := otlpmetricgrpc.New(ctx,
+			otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
+			otlpmetricgrpc.WithDialOption(dialOpts...),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("otel metric exporter: %w", err)
+		}
+		mp := metric.NewMeterProvider(
+			metric.WithReader(metric.NewPeriodicReader(mexp, metric.WithInterval(cfg.MetricExportInterval))),
+			metric.WithResource(res),
+		)
+		otel.SetMeterProvider(mp)
+		c.shutdownFuncs = append(c.shutdownFuncs, mp.Shutdown)
+	}
+
+	if cfg.ExportLogs {
+		lexp, err := otlploggrpc.New(ctx,
+			otlploggrpc.WithEndpoint(cfg.Endpoint),
+			otlploggrpc.WithDialOption(dialOpts...),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("otel log exporter: %w", err)
+		}
+		lp := sdklog.NewLoggerProvider(
+			sdklog.WithProcessor(sdklog.NewBatchProcessor(lexp)),
+			sdklog.WithResource(res),
+		)
+		global.SetLoggerProvider(lp)
+		c.shutdownFuncs = append(c.shutdownFuncs, lp.Shutdown)
+	}
+
+	return c, nil
+}
+
+// EmitAnomaly records an anomaly as a span (when tracing export is enabled).
+func (c *Client) EmitAnomaly(ctx context.Context, r scorer.Result, w *aggregator.Window) {
+	if c == nil || c.tracer == nil {
+		return
+	}
+	_, span := c.tracer.Start(ctx, "anomaly."+r.Key.MetricName,
+		trace.WithAttributes(
+			attribute.String("ebpf.anomaly.metric", r.Key.MetricName),
+			attribute.String("ebpf.anomaly.dimension.user", r.Key.User),
+			attribute.String("ebpf.anomaly.dimension.process", r.Key.Process),
+			attribute.String("ebpf.anomaly.dimension.container", r.Key.Container),
+			attribute.Float64("ebpf.anomaly.observed", r.Observed),
+			attribute.Float64("ebpf.anomaly.baseline_mean", r.Mean),
+			attribute.Float64("ebpf.anomaly.baseline_stddev", r.StdDev),
+			attribute.Float64("ebpf.anomaly.zscore", r.ZScore),
+			attribute.Bool("ebpf.anomaly.used_mad", r.UsedMAD),
+			attribute.String("ebpf.anomaly.severity", r.Severity),
+			attribute.String("ebpf.anomaly.window_start", w.Start.Format(time.RFC3339)),
+			attribute.String("ebpf.anomaly.window_end", w.End.Format(time.RFC3339)),
+		))
+	span.End()
+}
+
+// EmitSecurityEvent is a placeholder for OTLP log export; high-value events are traced when tracing is enabled.
+func (c *Client) EmitSecurityEvent(ctx context.Context, ev *enricher.EnrichedEvent) {
+	if c == nil || c.tracer == nil {
+		return
+	}
+	rate := sampleRate(c.sampling, ev.Raw.EventType)
+	if rate <= 0 {
+		return
+	}
+	if rate < 1.0 && (int(ev.Raw.TimestampNs)%1000) > int(rate*1000) {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.Int("ebpf.event.type_id", int(ev.Raw.EventType)),
+		attribute.String("ebpf.event.comm", ev.Raw.CommString()),
+		attribute.String("ebpf.event.binary", ev.Binary),
+		attribute.String("ebpf.event.dest_ip", ev.Raw.FormatDestIP()),
+		attribute.Int("ebpf.event.dest_port", int(ev.Raw.DestPort)),
+	}
+	if len(ev.MitreTags) > 0 {
+		attrs = append(attrs, attribute.String("mitre.technique.ids", strings.Join(ev.MitreTags, ",")))
+	}
+	_, span := c.tracer.Start(ctx, "security.event", trace.WithAttributes(attrs...))
+	span.End()
+}
+
+func sampleRate(m map[string]float64, eventType uint8) float64 {
+	key := "exec"
+	switch eventType {
+	case 3:
+		key = "ptrace"
+	case 2:
+		key = "connect"
+	case 9:
+		key = "bind"
+	case 10:
+		key = "dns"
+	case 4:
+		key = "sensitive_file"
+	}
+	if r, ok := m[key]; ok {
+		return r
+	}
+	return 0.01
+}
+
+// Shutdown flushes and shuts down all providers.
+func (c *Client) Shutdown(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	var first error
+	for _, fn := range c.shutdownFuncs {
+		if e := fn(ctx); e != nil && first == nil {
+			first = e
+		}
+	}
+	return first
+}

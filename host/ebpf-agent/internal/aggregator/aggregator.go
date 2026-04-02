@@ -1,6 +1,7 @@
 package aggregator
 
 import (
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -25,22 +26,30 @@ type Window struct {
 
 // Aggregator collects enriched events into time-bucketed windows.
 type Aggregator struct {
-	windowSize time.Duration
-	perUser    bool
-	perProcess bool
-	perCont    bool
+	windowSize   time.Duration
+	perUser      bool
+	perProcess   bool
+	perCont      bool
+	network      bool
+	filesystem   bool
+	scheduling   bool
+	uniqueDestIP map[DimensionKey]map[string]struct{} // connect events only: dedupe dest IPs per dimension key
 
 	mu      sync.Mutex
 	current *Window
 }
 
-func New(windowSize time.Duration, perUser, perProcess, perContainer bool) *Aggregator {
+func New(windowSize time.Duration, perUser, perProcess, perContainer, network, filesystem, scheduling bool) *Aggregator {
 	now := time.Now()
 	return &Aggregator{
-		windowSize: windowSize,
-		perUser:    perUser,
-		perProcess: perProcess,
-		perCont:    perContainer,
+		windowSize:   windowSize,
+		perUser:      perUser,
+		perProcess:   perProcess,
+		perCont:      perContainer,
+		network:      network,
+		filesystem:   filesystem,
+		scheduling:   scheduling,
+		uniqueDestIP: make(map[DimensionKey]map[string]struct{}),
 		current: &Window{
 			Start:  now,
 			End:    now.Add(windowSize),
@@ -49,7 +58,30 @@ func New(windowSize time.Duration, perUser, perProcess, perContainer bool) *Aggr
 	}
 }
 
+func (a *Aggregator) shouldInclude(ev *enricher.EnrichedEvent) bool {
+	if !a.network {
+		switch ev.Raw.EventType {
+		case ringbuf.EventConnect, ringbuf.EventBind, ringbuf.EventDNS:
+			return false
+		}
+	}
+	if !a.filesystem && ev.Raw.EventType == ringbuf.EventOpenat {
+		return false
+	}
+	if !a.scheduling {
+		switch ev.Raw.EventType {
+		case ringbuf.EventFork, ringbuf.EventExit:
+			return false
+		}
+	}
+	return true
+}
+
 func (a *Aggregator) Add(ev *enricher.EnrichedEvent) {
+	if !a.shouldInclude(ev) {
+		return
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -60,7 +92,11 @@ func (a *Aggregator) Add(ev *enricher.EnrichedEvent) {
 		key.User = ev.Username
 	}
 	if a.perProcess {
-		key.Process = ev.Raw.CommString()
+		if ev.Resolved && ev.Binary != "" {
+			key.Process = "bin:" + filepath.Base(ev.Binary)
+		} else {
+			key.Process = "comm:" + ev.Raw.CommString()
+		}
 	}
 	if a.perCont && ev.Container != "" {
 		key.Container = ev.Container
@@ -72,6 +108,32 @@ func (a *Aggregator) Add(ev *enricher.EnrichedEvent) {
 	if key != hostKey {
 		a.current.Counts[hostKey]++
 	}
+
+	// unique_dest_ips: distinct destination IPs per dimension (connect only, not suspicious_connect)
+	if metricName == "connect" && ev.Raw.IPVersion != ringbuf.IPVersionNone {
+		ipStr := ev.Raw.FormatDestIP()
+		if ipStr != "" {
+			a.recordUniqueIPForConnect(key, ipStr)
+			if hostKey != key {
+				a.recordUniqueIPForConnect(hostKey, ipStr)
+			}
+		}
+	}
+}
+
+func (a *Aggregator) recordUniqueIPForConnect(connectDim DimensionKey, ip string) {
+	set, ok := a.uniqueDestIP[connectDim]
+	if !ok {
+		set = make(map[string]struct{})
+		a.uniqueDestIP[connectDim] = set
+	}
+	if _, exists := set[ip]; exists {
+		return
+	}
+	set[ip] = struct{}{}
+	ud := connectDim
+	ud.MetricName = "unique_dest_ips"
+	a.current.Counts[ud]++
 }
 
 // Rotate closes the current window and returns it, starting a new one.
@@ -81,6 +143,7 @@ func (a *Aggregator) Rotate() *Window {
 
 	finished := a.current
 	now := time.Now()
+	a.uniqueDestIP = make(map[DimensionKey]map[string]struct{})
 	a.current = &Window{
 		Start:  now,
 		End:    now.Add(a.windowSize),
@@ -107,7 +170,13 @@ func eventTypeToMetric(evType uint8, flags uint8) string {
 	case ringbuf.EventPtrace:
 		return "ptrace"
 	case ringbuf.EventOpenat:
-		return "sensitive_file"
+		if flags&ringbuf.FlagPasswdRead != 0 {
+			return "passwd_read"
+		}
+		if flags&ringbuf.FlagSensitiveFile != 0 {
+			return "sensitive_file"
+		}
+		return "file_open"
 	case ringbuf.EventSetuid:
 		return "setuid"
 	case ringbuf.EventSetgid:
