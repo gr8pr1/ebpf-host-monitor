@@ -6,13 +6,13 @@
 
 ## 2026-04-03 — Next implementation priorities (documented)
 
-**What:** Recorded the **post-roadmap backlog** (what to build after the full implementation plan in `state.md` dated 2026-04-02) in **`ARCHITECTURE.md`** under *Next implementation priorities*, and refreshed the **Implementation Status** table there so OTel/MAD rows match shipped code.
+**What:** Recorded the **post-roadmap backlog** (what to build after the full implementation plan in `state.md` dated 2026-04-02) in **`ARCHITECTURE.md`** under *Next implementation priorities*, and refreshed the **Implementation Status** table there so OTel/MAD rows match shipped code. **`CLAUDE.md`** now points to that section and clarifies roles vs this changelog.
 
-**Why:** The six-phase roadmap + `issues.md` items are done; future work is follow-ups (OTel LogRecords, cold-start fast-track wiring, ARCHITECTURE metric catalog, kill-chain, ops, testing). Single place in ARCHITECTURE + this log for planning.
+**Why:** The six-phase roadmap + `issues.md` items are done; future work is follow-ups (OTel LogRecords, cold-start fast-track wiring, ARCHITECTURE metric catalog, kill-chain, ops, testing). Planning lives in **ARCHITECTURE.md** + **CLAUDE.md** (roadmap); **state.md** remains the authoritative shipped changelog.
 
-**See:** [ARCHITECTURE.md](ARCHITECTURE.md) § Implementation Status and § Next implementation priorities.
+**See:** [ARCHITECTURE.md](ARCHITECTURE.md) § Implementation Status and § Next implementation priorities; [CLAUDE.md](CLAUDE.md) § Next implementation priorities (index) and § Roadmap / Pending Work.
 
-**Note:** `ARCHITECTURE.md` was removed from `.gitignore` so this section is tracked in git with the repo.
+**Note:** **`ARCHITECTURE.md`**, **`state.md`**, and **`CLAUDE.md`** are **not** listed in `.gitignore` — all are tracked in git so rules, changelog, and architecture stay in the repo.
 
 ---
 

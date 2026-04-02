@@ -116,6 +116,16 @@ sudo ./ebpf-agent -config config.yaml
 
 ---
 
+## Next implementation priorities (index)
+
+The **full roadmap** (phases 1–6, `issues.md`) is **complete** — see [state.md](state.md) (2026-04-02 entry).
+
+**What to build next** (ordered backlog and status tables): **[ARCHITECTURE.md](ARCHITECTURE.md) § Next implementation priorities** and § Implementation Status.
+
+This file’s **Roadmap / Pending Work** below is the same backlog grouped **by priority area** for day-to-day work. Every shipped change must still be logged in **state.md** (rule at top of this file).
+
+---
+
 ## Roadmap / Pending Work
 
 ### Priority 1 — OpenTelemetry (done / follow-ups)
@@ -187,7 +197,7 @@ When adding a new eBPF tracepoint/monitor, touch all of these:
 
 | File | Purpose |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Design document (~1015 lines); authoritative on intended architecture |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Design document (~1030 lines); authoritative on intended architecture + *Next implementation priorities* |
 | [diagram.md](diagram.md) | Mermaid diagrams for all subsystems |
 | [host/ebpf-agent/config.yaml](host/ebpf-agent/config.yaml) | Full configuration template with all options |
 | [host/ebpf-agent/bpf/exec.bpf.c](host/ebpf-agent/bpf/exec.bpf.c) | All eBPF kernel programs |
