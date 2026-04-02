@@ -52,3 +52,8 @@ build/
 # Coverage reports
 coverage.txt
 coverage.html
+
+
+ARCHITECTURE.md
+state.md
+CLAUDE.md
